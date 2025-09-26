@@ -52,7 +52,7 @@ Maze Wars–style multiplayer FPS with a client–server architecture over UDP. 
 2. Choose the client rendering stack:
    - Bevy (plugin-based, ECS, batteries-included), or
    - macroquad (lightweight, quick to implement).
-3. Define the UDP protocol in [docs/protocol.md](cci:7://file:///c:/Users/walaa/Downloads/multiplayer-fps/docs/protocol.md:0:0-0:0) and implement types in `crates/shared`.
+3. Define the UDP protocol in [docs/protocol.md] and implement types in `crates/shared`.
 4. Implement server networking and fixed-tick loop.
 5. Implement client networking, prediction/interpolation, rendering, mini-map, and FPS overlay.
 6. Fill the `levels/*.ron` format and loaders.

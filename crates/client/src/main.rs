@@ -1,8 +1,11 @@
 use macroquad::prelude::*;
-use std::f32::consts::PI;
 use std::net::UdpSocket;
 use std::time::Instant;
 use std::io::{self, Write};
+use std::f32::consts::PI;
+
+mod themes;
+use themes::{LevelTheme, ThemeConfig};
 
 const MAZE_WIDTH: usize = 16;
 const MAZE_HEIGHT: usize = 16;
@@ -68,6 +71,7 @@ struct GameState {
     wall_hit_flash: f32,
     enemies: Vec<Enemy>,
     last_enemy_attack: Instant,
+    current_theme: LevelTheme,
 }
 
 impl GameState {
@@ -117,6 +121,7 @@ impl GameState {
             wall_hit_flash: 0.0,
             enemies: Vec::new(),
             last_enemy_attack: Instant::now(),
+            current_theme: LevelTheme::CandyMaze,
         }
     }
 
@@ -155,7 +160,7 @@ impl GameState {
         let mut new_x = self.player_x;
         let mut new_y = self.player_y;
 
-        // Forward/backward
+        // Handle input
         if is_key_down(KeyCode::W) {
             new_x += self.player_angle.cos() * move_speed;
             new_y += self.player_angle.sin() * move_speed;
@@ -164,8 +169,6 @@ impl GameState {
             new_x -= self.player_angle.cos() * move_speed;
             new_y -= self.player_angle.sin() * move_speed;
         }
-
-        // Strafing (A/D keys for side movement)
         if is_key_down(KeyCode::A) {
             new_x += (self.player_angle - PI/2.0).cos() * strafe_speed;
             new_y += (self.player_angle - PI/2.0).sin() * strafe_speed;
@@ -173,6 +176,15 @@ impl GameState {
         if is_key_down(KeyCode::D) {
             new_x += (self.player_angle + PI/2.0).cos() * strafe_speed;
             new_y += (self.player_angle + PI/2.0).sin() * strafe_speed;
+        }
+        
+        // Debug: Cycle through themes with T key
+        if is_key_pressed(KeyCode::T) {
+            self.current_theme = match self.current_theme {
+                LevelTheme::CandyMaze => LevelTheme::Cyberpunk,
+                LevelTheme::Cyberpunk => LevelTheme::MoroccanBazaar,
+                LevelTheme::MoroccanBazaar => LevelTheme::CandyMaze,
+            };
         }
 
         // Arrow keys for keyboard-only players
@@ -240,6 +252,9 @@ impl GameState {
         self.player_x = 3.5 * CELL_SIZE;
         self.player_y = 3.5 * CELL_SIZE;
         self.player_angle = 0.0;
+
+        // Update theme based on level
+        self.current_theme = LevelTheme::from_level(self.level);
 
         // Generate new maze based on level
         self.generate_maze_for_level(self.level as i32);
@@ -520,10 +535,14 @@ impl GameState {
         let screen_width = screen_width();
         let screen_height = screen_height();
         let num_rays = 320;
+        let theme = self.current_theme.get_config();
         
-        // Draw floor and ceiling with gradient
-        draw_rectangle(0.0, 0.0, screen_width, screen_height / 2.0, Color::from_rgba(20, 20, 40, 255)); // Dark blue ceiling
-        draw_rectangle(0.0, screen_height / 2.0, screen_width, screen_height / 2.0, Color::from_rgba(40, 40, 40, 255)); // Dark gray floor
+        // Draw themed floor and ceiling
+        draw_rectangle(0.0, 0.0, screen_width, screen_height / 2.0, theme.ceiling_color);
+        draw_rectangle(0.0, screen_height / 2.0, screen_width, screen_height / 2.0, theme.floor_color);
+        
+        // Add theme-specific atmospheric effects
+        self.current_theme.draw_atmospheric_effects(&theme, self.crosshair_pulse);
         
         for i in 0..num_rays {
             let ray_angle = self.player_angle - FOV / 2.0 + (i as f32 / num_rays as f32) * FOV;
@@ -551,14 +570,9 @@ impl GameState {
             let wall_top = (screen_height / 2.0) - wall_height / 2.0;
             let wall_bottom = (screen_height / 2.0) + wall_height / 2.0;
             
-            // Enhanced wall rendering with distance-based shading
-            let brightness = (1.0 - (distance / 500.0).min(1.0)) * 255.0;
-            let wall_color = Color::from_rgba(
-                (brightness * 0.8) as u8,  // Red component
-                (brightness * 0.9) as u8,  // Green component  
-                brightness as u8,          // Blue component
-                255
-            );
+            // Themed wall rendering with distance-based shading
+            let brightness_factor = 1.0 - (distance / 500.0).min(1.0);
+            let wall_color = self.current_theme.get_wall_color(&theme, brightness_factor, i);
             
             // Draw wall with thickness for better appearance
             let x = (i as f32 / num_rays as f32) * screen_width;
@@ -589,54 +603,65 @@ impl GameState {
     }
     
     fn draw_enhanced_hud(&self) {
-        let sw = screen_width();
-        let sh = screen_height();
+        let screen_width = screen_width();
+        let screen_height = screen_height();
+        let theme = self.current_theme.get_config();
         
-        // Professional HUD background panels
-        draw_rectangle(5.0, 5.0, 300.0, 140.0, Color::from_rgba(0, 0, 0, 150));
-        draw_rectangle_lines(5.0, 5.0, 300.0, 140.0, 2.0, Color::from_rgba(0, 255, 255, 100));
+        // Themed HUD background
+        let hud_height = 120.0;
+        let hud_y = screen_height - hud_height;
         
-        // FPS counter with color coding
-        let fps_color = if self.fps_counter >= 60.0 { GREEN } 
-                       else if self.fps_counter >= 30.0 { YELLOW } 
-                       else { RED };
-        draw_text(&format!("FPS: {:.0}", self.fps_counter), 15.0, 30.0, 24.0, fps_color);
+        // Semi-transparent background with themed border
+        draw_rectangle(0.0, hud_y, screen_width, hud_height, Color::from_rgba(0, 0, 0, 180));
+        draw_rectangle_lines(0.0, hud_y, screen_width, hud_height, 2.0, theme.hud_primary);
         
-        // Player info
-        draw_text(&format!("PILOT: {}", self.username), 15.0, 55.0, 18.0, SKYBLUE);
-        draw_text(&format!("LEVEL: {} | SCORE: {}", self.level, self.score), 15.0, 75.0, 18.0, YELLOW);
+        // FPS Counter with themed colors
+        let fps_color = if self.fps_counter >= 60.0 {
+            theme.hud_accent  // Good FPS
+        } else if self.fps_counter >= 30.0 {
+            theme.hud_secondary  // Okay FPS
+        } else {
+            Color::from_rgba(255, 0, 0, 255)  // Red for poor FPS
+        };
+        
+        draw_text(&format!("FPS: {:.0}", self.fps_counter), 20.0, hud_y + 25.0, 20.0, fps_color);
+        
+        // Themed player info
+        draw_text(&format!("PILOT: {}", self.username), 15.0, 55.0, 18.0, theme.text_primary);
+        draw_text(&format!("LEVEL: {} | SCORE: {}", self.level, self.score), 15.0, 75.0, 18.0, theme.text_secondary);
         
         // Health and ammo bars
         let health_width = (self.health as f32 / 100.0) * 100.0;
         let ammo_width = (self.ammo as f32 / 30.0) * 100.0;
         
-        // Health bar
-        draw_text("HEALTH:", 15.0, 100.0, 16.0, WHITE);
+        // Themed health bar
+        draw_text("HEALTH:", 15.0, 100.0, 16.0, theme.text_primary);
         draw_rectangle(80.0, 88.0, 100.0, 12.0, Color::from_rgba(100, 0, 0, 200));
-        draw_rectangle(80.0, 88.0, health_width, 12.0, if self.health > 50 { GREEN } else { RED });
-        draw_rectangle_lines(80.0, 88.0, 100.0, 12.0, 1.0, WHITE);
+        draw_rectangle(80.0, 88.0, health_width, 12.0, if self.health > 50 { theme.hud_accent } else { Color::from_rgba(255, 0, 0, 255) });
+        draw_rectangle_lines(80.0, 88.0, 100.0, 12.0, 1.0, theme.hud_primary);
         
-        // Ammo bar
-        draw_text("AMMO:", 15.0, 120.0, 16.0, WHITE);
-        draw_rectangle(80.0, 108.0, 100.0, 12.0, Color::from_rgba(100, 100, 0, 200));
-        draw_rectangle(80.0, 108.0, ammo_width, 12.0, if self.ammo > 10 { BLUE } else { RED });
-        draw_rectangle_lines(80.0, 108.0, 100.0, 12.0, 1.0, WHITE);
+        // Themed ammo bar
+        draw_text("AMMO:", 200.0, 100.0, 16.0, theme.text_primary);
+        draw_rectangle(250.0, 88.0, 100.0, 12.0, Color::from_rgba(100, 100, 0, 200));
+        draw_rectangle(250.0, 88.0, ammo_width, 12.0, if self.ammo > 10 { theme.hud_secondary } else { Color::from_rgba(255, 0, 0, 255) });
+        draw_rectangle_lines(250.0, 88.0, 100.0, 12.0, 1.0, theme.hud_primary);
         
-        // Mission status
+        // Themed mission status
         if self.game_won {
             let text = "🎉 MISSION COMPLETE! ALL LEVELS CLEARED! 🎉";
             let text_width = measure_text(text, None, 28, 1.0).width;
-            draw_rectangle(sw/2.0 - text_width/2.0 - 10.0, sh/2.0 - 20.0, text_width + 20.0, 40.0, Color::from_rgba(0, 100, 0, 200));
-            draw_text(text, sw/2.0 - text_width/2.0, sh/2.0, 28.0, GREEN);
+            draw_rectangle(screen_width/2.0 - text_width/2.0 - 10.0, screen_height/2.0 - 20.0, text_width + 20.0, 40.0, Color::from_rgba(0, 100, 0, 200));
+            draw_text(text, screen_width/2.0 - text_width/2.0, screen_height/2.0, 28.0, theme.hud_accent);
         } else {
-            draw_text("🎯 OBJECTIVE: Reach the EXIT (red square)", 15.0, sh - 80.0, 18.0, Color::from_rgba(255, 255, 0, 200));
+            let objective_text = self.current_theme.get_objective_text();
+            draw_text(objective_text, 15.0, screen_height - 80.0, 18.0, theme.text_secondary);
         }
         
-        // Controls help
-        draw_rectangle(5.0, sh - 60.0, 400.0, 55.0, Color::from_rgba(0, 0, 0, 150));
-        draw_rectangle_lines(5.0, sh - 60.0, 400.0, 55.0, 1.0, Color::from_rgba(0, 255, 255, 100));
-        draw_text("CONTROLS: WASD/Mouse=Move | SPACE=Shoot | ESC=Menu", 15.0, sh - 40.0, 16.0, WHITE);
-        draw_text("STATUS: Connected to Combat Network", 15.0, sh - 20.0, 16.0, GREEN);
+        // Themed controls help
+        draw_rectangle(5.0, screen_height - 60.0, 450.0, 55.0, Color::from_rgba(0, 0, 0, 150));
+        draw_rectangle_lines(5.0, screen_height - 60.0, 450.0, 55.0, 1.0, theme.hud_primary);
+        draw_text("CONTROLS: WASD/Mouse=Move | SPACE=Shoot | T=Theme", 15.0, screen_height - 40.0, 16.0, theme.text_primary);
+        draw_text("STATUS: Connected to Combat Network", 15.0, screen_height - 20.0, 16.0, theme.hud_accent);
     }
     
     fn draw_crosshair(&self) {
@@ -644,11 +669,12 @@ impl GameState {
         let center_y = screen_height() / 2.0;
         let size = 15.0 + (self.crosshair_pulse.sin() * 3.0);
         let thickness = 2.0;
+        let theme = self.current_theme.get_config();
         
-        // Animated crosshair with pulse effect
+        // Themed animated crosshair with pulse effect
         let alpha = if self.ammo > 0 { 200 } else { 100 };
         let color = if self.ammo > 0 { 
-            Color::from_rgba(0, 255, 0, alpha) 
+            Color::from_rgba((theme.hud_accent.r * 255.0) as u8, (theme.hud_accent.g * 255.0) as u8, (theme.hud_accent.b * 255.0) as u8, alpha) 
         } else { 
             Color::from_rgba(255, 0, 0, alpha) 
         };
