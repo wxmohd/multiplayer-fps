@@ -1,0 +1,1 @@
+// Shared library crate for protocol/types (placeholder)
