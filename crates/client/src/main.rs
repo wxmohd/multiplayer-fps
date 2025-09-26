@@ -1,26 +1,73 @@
 use macroquad::prelude::*;
-use std::io::{self, Write};
+use std::f32::consts::PI;
 use std::net::UdpSocket;
 use std::time::Instant;
+use std::io::{self, Write};
 
 const MAZE_WIDTH: usize = 16;
 const MAZE_HEIGHT: usize = 16;
 const CELL_SIZE: f32 = 64.0;
+const FOV: f32 = PI / 3.0; // 60 degrees field of view
+const RENDER_DISTANCE: f32 = 1000.0;
+
+#[derive(Clone, Copy)]
+struct Enemy {
+    x: f32,
+    y: f32,
+    angle: f32,
+    health: i32,
+    patrol_target_x: f32,
+    patrol_target_y: f32,
+    last_seen_player: Instant,
+    state: EnemyState,
+}
+
+#[derive(Clone, Copy)]
+enum EnemyState {
+    Patrolling,
+    Chasing,
+    Attacking,
+}
+
+impl Enemy {
+    fn new(x: f32, y: f32, angle: f32) -> Self {
+        Self {
+            x,
+            y,
+            angle,
+            health: 50,
+            patrol_target_x: x,
+            patrol_target_y: y,
+            last_seen_player: Instant::now(),
+            state: EnemyState::Patrolling,
+        }
+    }
+}
 
 struct GameState {
     player_x: f32,
     player_y: f32,
     player_angle: f32,
-    fps_counter: f32,
-    last_frame_time: Instant,
-    username: String,
-    server_addr: String,
-    maze: [[bool; MAZE_WIDTH]; MAZE_HEIGHT], // true = wall, false = empty
+    maze: [[bool; MAZE_WIDTH]; MAZE_HEIGHT],
+    level: usize,
+    score: i32,
     exit_x: f32,
     exit_y: f32,
-    score: i32,
-    level: i32,
+    server_addr: String,
+    username: String,
+    mouse_sensitivity: f32,
+    last_mouse_x: f32,
+    frame_start: Instant,
+    frame_times: Vec<f32>,
+    health: i32,
+    ammo: i32,
     game_won: bool,
+    last_frame_time: Instant,
+    fps_counter: f32,
+    crosshair_pulse: f32,
+    wall_hit_flash: f32,
+    enemies: Vec<Enemy>,
+    last_enemy_attack: Instant,
 }
 
 impl GameState {
@@ -47,69 +94,126 @@ impl GameState {
         maze[4][12] = true; maze[5][12] = true; maze[6][12] = true;
         
         Self {
-            player_x: 3.5 * CELL_SIZE, // Start in open area
+            player_x: 3.5 * CELL_SIZE,
             player_y: 3.5 * CELL_SIZE,
             player_angle: 0.0,
-            fps_counter: 0.0,
-            last_frame_time: Instant::now(),
-            username,
-            server_addr,
             maze,
-            exit_x: 13.5 * CELL_SIZE, // Exit in bottom-right area
+            exit_x: 13.5 * CELL_SIZE,
             exit_y: 13.5 * CELL_SIZE,
-            score: 0,
+            server_addr,
+            username,
+            mouse_sensitivity: 0.003,
+            last_mouse_x: 0.0,
+            frame_start: Instant::now(),
+            frame_times: Vec::with_capacity(60),
+            health: 100,
+            ammo: 30,
             level: 1,
+            score: 0,
             game_won: false,
+            last_frame_time: Instant::now(),
+            fps_counter: 60.0,
+            crosshair_pulse: 0.0,
+            wall_hit_flash: 0.0,
+            enemies: Vec::new(),
+            last_enemy_attack: Instant::now(),
         }
     }
 
     fn update(&mut self) {
-        // Calculate FPS
+        // Calculate FPS with smoothing
         let now = Instant::now();
         let delta = now.duration_since(self.last_frame_time).as_secs_f32();
-        self.fps_counter = 1.0 / delta;
+        let current_fps = 1.0 / delta.max(0.001);
+        
+        // Add to frame times buffer for smooth FPS calculation
+        self.frame_times.push(current_fps);
+        if self.frame_times.len() > 60 {
+            self.frame_times.remove(0);
+        }
+        
+        // Calculate average FPS
+        self.fps_counter = self.frame_times.iter().sum::<f32>() / self.frame_times.len() as f32;
         self.last_frame_time = now;
 
-        let move_speed = 150.0 * delta;
-        let turn_speed = 2.0 * delta;
+        // Update animations
+        self.crosshair_pulse += delta * 3.0;
+        self.wall_hit_flash = (self.wall_hit_flash - delta * 2.0).max(0.0);
 
-        // Handle rotation
-        if is_key_down(KeyCode::Left) || is_key_down(KeyCode::A) {
-            self.player_angle -= turn_speed;
+        // Mouse look (professional FPS controls)
+        let (mouse_x, _) = mouse_position();
+        if self.last_mouse_x != 0.0 {
+            let mouse_delta = mouse_x - self.last_mouse_x;
+            self.player_angle += mouse_delta * self.mouse_sensitivity;
         }
-        if is_key_down(KeyCode::Right) || is_key_down(KeyCode::D) {
-            self.player_angle += turn_speed;
-        }
+        self.last_mouse_x = mouse_x;
 
-        // Handle movement
+        let move_speed = 200.0 * delta; // Increased for better feel
+        let strafe_speed = 180.0 * delta;
+
+        // Professional FPS movement (WASD + mouse)
         let mut new_x = self.player_x;
         let mut new_y = self.player_y;
 
-        if is_key_down(KeyCode::Up) || is_key_down(KeyCode::W) {
+        // Forward/backward
+        if is_key_down(KeyCode::W) {
             new_x += self.player_angle.cos() * move_speed;
             new_y += self.player_angle.sin() * move_speed;
         }
-        if is_key_down(KeyCode::Down) || is_key_down(KeyCode::S) {
+        if is_key_down(KeyCode::S) {
             new_x -= self.player_angle.cos() * move_speed;
             new_y -= self.player_angle.sin() * move_speed;
         }
 
-        // Collision detection
+        // Strafing (A/D keys for side movement)
+        if is_key_down(KeyCode::A) {
+            new_x += (self.player_angle - PI/2.0).cos() * strafe_speed;
+            new_y += (self.player_angle - PI/2.0).sin() * strafe_speed;
+        }
+        if is_key_down(KeyCode::D) {
+            new_x += (self.player_angle + PI/2.0).cos() * strafe_speed;
+            new_y += (self.player_angle + PI/2.0).sin() * strafe_speed;
+        }
+
+        // Arrow keys for keyboard-only players
+        if is_key_down(KeyCode::Left) {
+            self.player_angle -= 2.0 * delta;
+        }
+        if is_key_down(KeyCode::Right) {
+            self.player_angle += 2.0 * delta;
+        }
+        if is_key_down(KeyCode::Up) {
+            new_x += self.player_angle.cos() * move_speed;
+            new_y += self.player_angle.sin() * move_speed;
+        }
+        if is_key_down(KeyCode::Down) {
+            new_x -= self.player_angle.cos() * move_speed;
+            new_y -= self.player_angle.sin() * move_speed;
+        }
+
+        // Enhanced collision detection with wall hit feedback
         if !self.is_wall(new_x, new_y) {
             self.player_x = new_x;
             self.player_y = new_y;
+        } else {
+            // Wall hit effect
+            self.wall_hit_flash = 0.3;
         }
 
         // Check if player reached the exit
         let distance_to_exit = ((self.player_x - self.exit_x).powi(2) + (self.player_y - self.exit_y).powi(2)).sqrt();
-        if distance_to_exit < 30.0 {
+        if distance_to_exit < 40.0 {
             self.advance_level();
         }
 
-        // Shooting mechanics
-        if is_key_pressed(KeyCode::Space) {
+        // Shooting mechanics with enhanced feedback
+        if is_key_pressed(KeyCode::Space) && self.ammo > 0 {
             self.shoot();
+            self.crosshair_pulse = 0.0; // Reset crosshair animation
         }
+        
+        // Update AI enemies
+        self.update_enemies(delta);
     }
 
     fn is_wall(&self, x: f32, y: f32) -> bool {
@@ -138,7 +242,14 @@ impl GameState {
         self.player_angle = 0.0;
 
         // Generate new maze based on level
-        self.generate_maze_for_level(self.level);
+        self.generate_maze_for_level(self.level as i32);
+        
+        // Spawn enemies for this level
+        self.spawn_enemies();
+        
+        // Reset health and ammo for new level
+        self.health = 100;
+        self.ammo = 30;
     }
 
     fn generate_maze_for_level(&mut self, level: i32) {
@@ -196,9 +307,193 @@ impl GameState {
     }
 
     fn shoot(&mut self) {
-        // Simple shooting - in multiplayer this would check for other players in line of sight
-        // For now, just show shooting feedback
-        self.score += 10;
+        if self.ammo > 0 {
+            self.ammo -= 1;
+            // Add muzzle flash effect
+            self.wall_hit_flash = 0.2;
+            
+            // Check if we hit any enemies
+            let hit_enemy = self.check_enemy_hit();
+            if hit_enemy {
+                self.score += 50; // More points for hitting enemies
+            } else {
+                self.score += 10; // Base shooting points
+            }
+        }
+    }
+    
+    fn check_enemy_hit(&mut self) -> bool {
+        let ray_cos = self.player_angle.cos();
+        let ray_sin = self.player_angle.sin();
+        let player_x = self.player_x;
+        let player_y = self.player_y;
+        let player_angle = self.player_angle;
+        
+        for enemy in &mut self.enemies {
+            if enemy.health <= 0 { continue; }
+            
+            // Calculate distance to enemy
+            let dx = enemy.x - player_x;
+            let dy = enemy.y - player_y;
+            let distance = (dx * dx + dy * dy).sqrt();
+            
+            if distance > 300.0 { continue; } // Max shooting range
+            
+            // Check if enemy is in line of sight
+            let angle_to_enemy = dy.atan2(dx);
+            let angle_diff = (angle_to_enemy - player_angle).abs();
+            
+            if angle_diff < 0.1 { // Small angle tolerance for hitting
+                // Check for walls between player and enemy
+                let steps = (distance / 5.0) as i32;
+                let mut blocked = false;
+                
+                for i in 1..steps {
+                    let check_x = player_x + ray_cos * (i as f32 * 5.0);
+                    let check_y = player_y + ray_sin * (i as f32 * 5.0);
+                    let grid_x = (check_x / CELL_SIZE) as usize;
+                    let grid_y = (check_y / CELL_SIZE) as usize;
+                    
+                    if grid_x >= MAZE_WIDTH || grid_y >= MAZE_HEIGHT || self.maze[grid_y][grid_x] {
+                        blocked = true;
+                        break;
+                    }
+                }
+                
+                if !blocked {
+                    enemy.health -= 25; // Damage per hit
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    
+    fn spawn_enemies(&mut self) {
+        self.enemies.clear();
+        let num_enemies = self.level + 1; // More enemies each level
+        
+        for i in 0..num_enemies {
+            // Find valid spawn positions (not in walls, not near player)
+            let mut attempts = 0;
+            while attempts < 50 {
+                let x = (4 + (i * 3) % 8) as f32 * CELL_SIZE + CELL_SIZE / 2.0;
+                let y = (4 + (i * 2) % 8) as f32 * CELL_SIZE + CELL_SIZE / 2.0;
+                
+                if !self.is_wall(x, y) {
+                    let distance_to_player = ((x - self.player_x).powi(2) + (y - self.player_y).powi(2)).sqrt();
+                    if distance_to_player > 200.0 { // Not too close to player
+                        self.enemies.push(Enemy::new(x, y, (i as f32 * PI / 2.0) % (2.0 * PI)));
+                        break;
+                    }
+                }
+                attempts += 1;
+            }
+        }
+    }
+    
+    fn update_enemies(&mut self, delta: f32) {
+        let player_pos = (self.player_x, self.player_y);
+        let maze = self.maze; // Copy maze for borrowing
+        
+        // Collect enemy updates to avoid borrowing issues
+        let mut enemy_updates = Vec::new();
+        let mut attack_occurred = false;
+        
+        for (i, enemy) in self.enemies.iter().enumerate() {
+            if enemy.health <= 0 { continue; }
+            
+            let distance_to_player = ((enemy.x - player_pos.0).powi(2) + (enemy.y - player_pos.1).powi(2)).sqrt();
+            
+            let mut new_enemy = *enemy;
+            
+            // AI State Machine
+            match enemy.state {
+                EnemyState::Patrolling => {
+                    // Simple patrol movement
+                    let move_speed = 50.0 * delta;
+                    let new_x = enemy.x + enemy.angle.cos() * move_speed;
+                    let new_y = enemy.y + enemy.angle.sin() * move_speed;
+                    
+                    // Check walls manually
+                    let grid_x = (new_x / CELL_SIZE) as usize;
+                    let grid_y = (new_y / CELL_SIZE) as usize;
+                    let is_wall = grid_x >= MAZE_WIDTH || grid_y >= MAZE_HEIGHT || maze[grid_y][grid_x];
+                    
+                    if !is_wall {
+                        new_enemy.x = new_x;
+                        new_enemy.y = new_y;
+                    } else {
+                        new_enemy.angle += PI / 2.0; // Turn 90 degrees
+                    }
+                    
+                    // Switch to chasing if player is close
+                    if distance_to_player < 150.0 {
+                        new_enemy.state = EnemyState::Chasing;
+                        new_enemy.last_seen_player = Instant::now();
+                    }
+                }
+                EnemyState::Chasing => {
+                    // Move towards player
+                    let angle_to_player = (player_pos.1 - enemy.y).atan2(player_pos.0 - enemy.x);
+                    new_enemy.angle = angle_to_player;
+                    
+                    let chase_speed = 80.0 * delta;
+                    let new_x = enemy.x + new_enemy.angle.cos() * chase_speed;
+                    let new_y = enemy.y + new_enemy.angle.sin() * chase_speed;
+                    
+                    // Check walls manually
+                    let grid_x = (new_x / CELL_SIZE) as usize;
+                    let grid_y = (new_y / CELL_SIZE) as usize;
+                    let is_wall = grid_x >= MAZE_WIDTH || grid_y >= MAZE_HEIGHT || maze[grid_y][grid_x];
+                    
+                    if !is_wall {
+                        new_enemy.x = new_x;
+                        new_enemy.y = new_y;
+                    }
+                    
+                    // Attack if very close
+                    if distance_to_player < 50.0 {
+                        new_enemy.state = EnemyState::Attacking;
+                    }
+                    
+                    // Return to patrol if player is far
+                    if distance_to_player > 200.0 {
+                        new_enemy.state = EnemyState::Patrolling;
+                    }
+                }
+                EnemyState::Attacking => {
+                    // Attack player
+                    if self.last_enemy_attack.elapsed().as_secs_f32() > 1.0 {
+                        attack_occurred = true;
+                    }
+                    
+                    // Return to chasing if not close enough
+                    if distance_to_player > 60.0 {
+                        new_enemy.state = EnemyState::Chasing;
+                    }
+                }
+            }
+            
+            enemy_updates.push((i, new_enemy));
+        }
+        
+        // Apply updates
+        for (i, updated_enemy) in enemy_updates {
+            if i < self.enemies.len() {
+                self.enemies[i] = updated_enemy;
+            }
+        }
+        
+        // Handle attack
+        if attack_occurred {
+            self.health -= 10;
+            self.last_enemy_attack = Instant::now();
+            self.wall_hit_flash = 0.5; // Red flash when hit
+        }
+        
+        // Remove dead enemies
+        self.enemies.retain(|e| e.health > 0);
     }
 
     fn draw(&self) {
@@ -218,71 +513,154 @@ impl GameState {
             30.0,
             WHITE,
         );
-
-        // Draw game info
-        draw_text(&format!("Player: {}", self.username), 10.0, 60.0, 20.0, WHITE);
-        draw_text(&format!("Level: {} | Score: {}", self.level, self.score), 10.0, 90.0, 20.0, YELLOW);
-        
-        if self.game_won {
-            draw_text("🎉 YOU WON! Completed all 3 levels! 🎉", 
-                     screen_width() / 2.0 - 200.0, screen_height() / 2.0, 30.0, GREEN);
-        } else {
-            draw_text("🎯 Find the EXIT (red square on minimap)", 10.0, 120.0, 18.0, SKYBLUE);
-        }
-        
-        draw_text("WASD/Arrows: Move/Turn | SPACE: Shoot", 10.0, screen_height() - 40.0, 16.0, WHITE);
-        draw_text("Connected to server", 10.0, screen_height() - 20.0, 16.0, GREEN);
+        self.draw_enhanced_hud();
     }
 
     fn draw_3d_view(&self) {
-        let viewport_width = screen_width() - 200.0; // Leave space for minimap
-        let viewport_height = screen_height();
+        let screen_width = screen_width();
+        let screen_height = screen_height();
+        let num_rays = 320;
         
-        let fov = std::f32::consts::PI / 3.0; // 60 degrees
-        let num_rays = viewport_width as i32;
+        // Draw floor and ceiling with gradient
+        draw_rectangle(0.0, 0.0, screen_width, screen_height / 2.0, Color::from_rgba(20, 20, 40, 255)); // Dark blue ceiling
+        draw_rectangle(0.0, screen_height / 2.0, screen_width, screen_height / 2.0, Color::from_rgba(40, 40, 40, 255)); // Dark gray floor
         
         for i in 0..num_rays {
-            let ray_angle = self.player_angle - fov / 2.0 + (i as f32 / num_rays as f32) * fov;
+            let ray_angle = self.player_angle - FOV / 2.0 + (i as f32 / num_rays as f32) * FOV;
             
-            let (distance, _hit_x, _hit_y) = self.cast_ray(ray_angle);
+            // Enhanced raycast with better precision
+            let mut distance = 0.0;
+            let ray_cos = ray_angle.cos();
+            let ray_sin = ray_angle.sin();
             
-            // Calculate wall height based on distance (perspective)
-            let wall_height = (viewport_height * 0.6) / (distance / CELL_SIZE);
-            let wall_top = (viewport_height - wall_height) / 2.0;
-            let wall_bottom = wall_top + wall_height;
+            while distance < RENDER_DISTANCE {
+                let test_x = self.player_x + ray_cos * distance;
+                let test_y = self.player_y + ray_sin * distance;
+                
+                if self.is_wall(test_x, test_y) {
+                    break;
+                }
+                distance += 1.0; // Higher precision
+            }
             
-            // Draw wall column with wireframe effect
-            let x = i as f32;
+            // Fish-eye correction
+            distance *= (ray_angle - self.player_angle).cos();
             
-            // Draw the wall as a vertical line (wireframe style)
-            draw_line(x, wall_top, x, wall_bottom, 2.0, WHITE);
+            // Calculate wall height with perspective
+            let wall_height = (screen_height * 0.6) / (distance / CELL_SIZE + 0.1);
+            let wall_top = (screen_height / 2.0) - wall_height / 2.0;
+            let wall_bottom = (screen_height / 2.0) + wall_height / 2.0;
             
-            // Add some depth shading
-            let shade = 1.0 - (distance / (CELL_SIZE * 8.0)).min(0.8);
-            let color = Color::new(shade, shade, shade, 1.0);
-            draw_line(x, wall_top, x, wall_bottom, 1.0, color);
+            // Enhanced wall rendering with distance-based shading
+            let brightness = (1.0 - (distance / 500.0).min(1.0)) * 255.0;
+            let wall_color = Color::from_rgba(
+                (brightness * 0.8) as u8,  // Red component
+                (brightness * 0.9) as u8,  // Green component  
+                brightness as u8,          // Blue component
+                255
+            );
+            
+            // Draw wall with thickness for better appearance
+            let x = (i as f32 / num_rays as f32) * screen_width;
+            let line_width = (screen_width / num_rays as f32).max(1.0);
+            
+            draw_rectangle(x, wall_top, line_width, wall_bottom - wall_top, wall_color);
+            
+            // Add wall edge highlighting for wireframe effect
+            if i % 8 == 0 || distance < 100.0 {
+                draw_line(x, wall_top, x, wall_bottom, 1.0, Color::from_rgba(255, 255, 255, 100));
+            }
         }
         
-        // Draw floor and ceiling lines for perspective
-        self.draw_perspective_lines(viewport_width, viewport_height);
+        // Add screen flash effect for wall hits
+        if self.wall_hit_flash > 0.0 {
+            let flash_alpha = (self.wall_hit_flash * 100.0) as u8;
+            draw_rectangle(0.0, 0.0, screen_width, screen_height, Color::from_rgba(255, 100, 100, flash_alpha));
+        }
+        
+        // Draw enemies in 3D view
+        self.draw_enemies_3d();
+        
+        // Draw professional crosshair
+        self.draw_crosshair();
+        
+        // Enhanced HUD with professional styling
+        self.draw_enhanced_hud();
     }
     
-    fn draw_perspective_lines(&self, width: f32, height: f32) {
-        let center_y = height / 2.0;
+    fn draw_enhanced_hud(&self) {
+        let sw = screen_width();
+        let sh = screen_height();
         
-        // Draw horizontal perspective lines for floor/ceiling
-        for i in 0..8 {
-            let y_offset = (i as f32 * 20.0) + 20.0;
-            let alpha = 0.3 - (i as f32 * 0.03);
-            
-            // Floor lines
-            draw_line(0.0, center_y + y_offset, width - 200.0, center_y + y_offset, 1.0, 
-                     Color::new(1.0, 1.0, 1.0, alpha));
-            
-            // Ceiling lines  
-            draw_line(0.0, center_y - y_offset, width - 200.0, center_y - y_offset, 1.0,
-                     Color::new(1.0, 1.0, 1.0, alpha));
+        // Professional HUD background panels
+        draw_rectangle(5.0, 5.0, 300.0, 140.0, Color::from_rgba(0, 0, 0, 150));
+        draw_rectangle_lines(5.0, 5.0, 300.0, 140.0, 2.0, Color::from_rgba(0, 255, 255, 100));
+        
+        // FPS counter with color coding
+        let fps_color = if self.fps_counter >= 60.0 { GREEN } 
+                       else if self.fps_counter >= 30.0 { YELLOW } 
+                       else { RED };
+        draw_text(&format!("FPS: {:.0}", self.fps_counter), 15.0, 30.0, 24.0, fps_color);
+        
+        // Player info
+        draw_text(&format!("PILOT: {}", self.username), 15.0, 55.0, 18.0, SKYBLUE);
+        draw_text(&format!("LEVEL: {} | SCORE: {}", self.level, self.score), 15.0, 75.0, 18.0, YELLOW);
+        
+        // Health and ammo bars
+        let health_width = (self.health as f32 / 100.0) * 100.0;
+        let ammo_width = (self.ammo as f32 / 30.0) * 100.0;
+        
+        // Health bar
+        draw_text("HEALTH:", 15.0, 100.0, 16.0, WHITE);
+        draw_rectangle(80.0, 88.0, 100.0, 12.0, Color::from_rgba(100, 0, 0, 200));
+        draw_rectangle(80.0, 88.0, health_width, 12.0, if self.health > 50 { GREEN } else { RED });
+        draw_rectangle_lines(80.0, 88.0, 100.0, 12.0, 1.0, WHITE);
+        
+        // Ammo bar
+        draw_text("AMMO:", 15.0, 120.0, 16.0, WHITE);
+        draw_rectangle(80.0, 108.0, 100.0, 12.0, Color::from_rgba(100, 100, 0, 200));
+        draw_rectangle(80.0, 108.0, ammo_width, 12.0, if self.ammo > 10 { BLUE } else { RED });
+        draw_rectangle_lines(80.0, 108.0, 100.0, 12.0, 1.0, WHITE);
+        
+        // Mission status
+        if self.game_won {
+            let text = "🎉 MISSION COMPLETE! ALL LEVELS CLEARED! 🎉";
+            let text_width = measure_text(text, None, 28, 1.0).width;
+            draw_rectangle(sw/2.0 - text_width/2.0 - 10.0, sh/2.0 - 20.0, text_width + 20.0, 40.0, Color::from_rgba(0, 100, 0, 200));
+            draw_text(text, sw/2.0 - text_width/2.0, sh/2.0, 28.0, GREEN);
+        } else {
+            draw_text("🎯 OBJECTIVE: Reach the EXIT (red square)", 15.0, sh - 80.0, 18.0, Color::from_rgba(255, 255, 0, 200));
         }
+        
+        // Controls help
+        draw_rectangle(5.0, sh - 60.0, 400.0, 55.0, Color::from_rgba(0, 0, 0, 150));
+        draw_rectangle_lines(5.0, sh - 60.0, 400.0, 55.0, 1.0, Color::from_rgba(0, 255, 255, 100));
+        draw_text("CONTROLS: WASD/Mouse=Move | SPACE=Shoot | ESC=Menu", 15.0, sh - 40.0, 16.0, WHITE);
+        draw_text("STATUS: Connected to Combat Network", 15.0, sh - 20.0, 16.0, GREEN);
+    }
+    
+    fn draw_crosshair(&self) {
+        let center_x = screen_width() / 2.0;
+        let center_y = screen_height() / 2.0;
+        let size = 15.0 + (self.crosshair_pulse.sin() * 3.0);
+        let thickness = 2.0;
+        
+        // Animated crosshair with pulse effect
+        let alpha = if self.ammo > 0 { 200 } else { 100 };
+        let color = if self.ammo > 0 { 
+            Color::from_rgba(0, 255, 0, alpha) 
+        } else { 
+            Color::from_rgba(255, 0, 0, alpha) 
+        };
+        
+        // Draw crosshair lines
+        draw_line(center_x - size, center_y, center_x - 5.0, center_y, thickness, color);
+        draw_line(center_x + 5.0, center_y, center_x + size, center_y, thickness, color);
+        draw_line(center_x, center_y - size, center_x, center_y - 5.0, thickness, color);
+        draw_line(center_x, center_y + 5.0, center_x, center_y + size, thickness, color);
+        
+        // Center dot
+        draw_circle(center_x, center_y, 1.5, color);
     }
 
     fn cast_ray(&self, angle: f32) -> (f32, f32, f32) {
@@ -305,51 +683,138 @@ impl GameState {
     }
 
     fn draw_minimap(&self) {
-        let minimap_size = 180.0;
-        let minimap_x = screen_width() - minimap_size - 10.0;
-        let minimap_y = 10.0;
-
-        // Minimap background
-        draw_rectangle(minimap_x, minimap_y, minimap_size, minimap_size, 
-                      Color::new(0.0, 0.0, 0.0, 0.8));
-        draw_rectangle_lines(minimap_x, minimap_y, minimap_size, minimap_size, 2.0, WHITE);
-
-        // Scale factor for minimap
-        let scale = minimap_size / (MAZE_WIDTH as f32 * CELL_SIZE);
-
-        // Draw maze walls on minimap
+        let map_size = 180.0;
+        let map_x = screen_width() - map_size - 10.0;
+        let map_y = 10.0;
+        let cell_size = map_size / MAZE_WIDTH as f32;
+        
+        // Draw minimap background with enhanced styling
+        draw_rectangle(map_x - 5.0, map_y - 25.0, map_size + 10.0, map_size + 30.0, Color::from_rgba(0, 0, 0, 180));
+        draw_rectangle_lines(map_x - 5.0, map_y - 25.0, map_size + 10.0, map_size + 30.0, 2.0, Color::from_rgba(0, 255, 255, 150));
+        draw_rectangle(map_x, map_y, map_size, map_size, Color::from_rgba(0, 0, 30, 200));
+        draw_rectangle_lines(map_x, map_y, map_size, map_size, 2.0, BLUE);
+        
+        // Draw maze walls with better visibility
         for y in 0..MAZE_HEIGHT {
             for x in 0..MAZE_WIDTH {
                 if self.maze[y][x] {
-                    let wall_x = minimap_x + (x as f32 * CELL_SIZE * scale);
-                    let wall_y = minimap_y + (y as f32 * CELL_SIZE * scale);
-                    let wall_size = CELL_SIZE * scale;
-                    
-                    draw_rectangle(wall_x, wall_y, wall_size, wall_size, BLUE);
+                    draw_rectangle(
+                        map_x + x as f32 * cell_size,
+                        map_y + y as f32 * cell_size,
+                        cell_size,
+                        cell_size,
+                        Color::from_rgba(100, 150, 255, 255),
+                    );
                 }
             }
         }
-
-        // Draw exit on minimap
-        let exit_map_x = minimap_x + (self.exit_x * scale);
-        let exit_map_y = minimap_y + (self.exit_y * scale);
-        draw_rectangle(exit_map_x - 4.0, exit_map_y - 4.0, 8.0, 8.0, RED);
-
-        // Draw player position and direction on minimap
-        let player_map_x = minimap_x + (self.player_x * scale);
-        let player_map_y = minimap_y + (self.player_y * scale);
         
-        // Player dot
-        draw_circle(player_map_x, player_map_y, 3.0, YELLOW);
+        // Draw exit with pulsing effect
+        let exit_map_x = map_x + (self.exit_x / CELL_SIZE) * cell_size;
+        let exit_map_y = map_y + (self.exit_y / CELL_SIZE) * cell_size;
+        let pulse = (self.crosshair_pulse * 2.0).sin() * 0.3 + 0.7;
+        draw_rectangle(exit_map_x, exit_map_y, cell_size, cell_size, 
+                      Color::from_rgba((255.0 * pulse) as u8, 0, 0, 255));
         
-        // Player direction indicator
-        let dir_length = 15.0;
+        // Draw player position and direction
+        let player_map_x = map_x + (self.player_x / CELL_SIZE) * cell_size + cell_size / 2.0;
+        let player_map_y = map_y + (self.player_y / CELL_SIZE) * cell_size + cell_size / 2.0;
+        
+        // Player dot with glow effect
+        draw_circle(player_map_x, player_map_y, 6.0, Color::from_rgba(255, 255, 0, 100));
+        draw_circle(player_map_x, player_map_y, 4.0, YELLOW);
+        
+        // Direction indicator
+        let dir_length = 12.0;
         let end_x = player_map_x + self.player_angle.cos() * dir_length;
         let end_y = player_map_y + self.player_angle.sin() * dir_length;
-        draw_line(player_map_x, player_map_y, end_x, end_y, 2.0, YELLOW);
-
-        // Minimap label
-        draw_text("Mini-map", minimap_x, minimap_y - 5.0, 16.0, WHITE);
+        draw_line(player_map_x, player_map_y, end_x, end_y, 3.0, Color::from_rgba(255, 255, 0, 200));
+        
+        // Draw enemies on minimap
+        for enemy in &self.enemies {
+            if enemy.health > 0 {
+                let enemy_map_x = map_x + (enemy.x / CELL_SIZE) * cell_size + cell_size / 2.0;
+                let enemy_map_y = map_y + (enemy.y / CELL_SIZE) * cell_size + cell_size / 2.0;
+                
+                // Enemy dot (red for hostile)
+                draw_circle(enemy_map_x, enemy_map_y, 3.0, RED);
+                
+                // Direction indicator for enemy
+                let enemy_dir_length = 6.0;
+                let enemy_end_x = enemy_map_x + enemy.angle.cos() * enemy_dir_length;
+                let enemy_end_y = enemy_map_y + enemy.angle.sin() * enemy_dir_length;
+                draw_line(enemy_map_x, enemy_map_y, enemy_end_x, enemy_end_y, 1.0, RED);
+            }
+        }
+        
+        // Enhanced minimap title
+        draw_text("TACTICAL MAP", map_x, map_y - 8.0, 16.0, Color::from_rgba(0, 255, 255, 255));
+    }
+    
+    fn draw_enemies_3d(&self) {
+        let screen_width = screen_width();
+        let screen_height = screen_height();
+        
+        for enemy in &self.enemies {
+            if enemy.health <= 0 { continue; }
+            
+            // Calculate distance and angle to enemy
+            let dx = enemy.x - self.player_x;
+            let dy = enemy.y - self.player_y;
+            let distance = (dx * dx + dy * dy).sqrt();
+            
+            if distance > 500.0 { continue; } // Don't render distant enemies
+            
+            // Check if enemy is in field of view
+            let angle_to_enemy = dy.atan2(dx);
+            let angle_diff = angle_to_enemy - self.player_angle;
+            let normalized_angle = ((angle_diff + PI) % (2.0 * PI)) - PI;
+            
+            if normalized_angle.abs() < FOV / 2.0 {
+                // Check if enemy is visible (not behind walls)
+                let steps = (distance / 5.0) as i32;
+                let mut visible = true;
+                
+                for i in 1..steps {
+                    let check_x = self.player_x + (dx / distance) * (i as f32 * 5.0);
+                    let check_y = self.player_y + (dy / distance) * (i as f32 * 5.0);
+                    if self.is_wall(check_x, check_y) {
+                        visible = false;
+                        break;
+                    }
+                }
+                
+                if visible {
+                    // Calculate screen position
+                    let screen_x = screen_width / 2.0 + (normalized_angle / FOV) * screen_width;
+                    
+                    // Enemy size based on distance (closer = bigger)
+                    let enemy_size = (30.0 / (distance / 100.0)).min(50.0).max(5.0);
+                    let enemy_y = screen_height / 2.0;
+                    
+                    // Draw enemy as an "eye" (classic Maze Wars style)
+                    let eye_color = match enemy.state {
+                        EnemyState::Patrolling => Color::from_rgba(255, 255, 0, 200), // Yellow
+                        EnemyState::Chasing => Color::from_rgba(255, 100, 0, 255),    // Orange
+                        EnemyState::Attacking => Color::from_rgba(255, 0, 0, 255),   // Red
+                    };
+                    
+                    // Draw enemy eye
+                    draw_circle(screen_x, enemy_y, enemy_size / 2.0, eye_color);
+                    draw_circle(screen_x, enemy_y, enemy_size / 4.0, BLACK); // Pupil
+                    
+                    // Health bar above enemy
+                    let health_ratio = enemy.health as f32 / 50.0;
+                    let bar_width = enemy_size;
+                    let bar_height = 4.0;
+                    let bar_y = enemy_y - enemy_size / 2.0 - 10.0;
+                    
+                    draw_rectangle(screen_x - bar_width / 2.0, bar_y, bar_width, bar_height, Color::from_rgba(100, 0, 0, 200));
+                    draw_rectangle(screen_x - bar_width / 2.0, bar_y, bar_width * health_ratio, bar_height, 
+                                 if health_ratio > 0.5 { GREEN } else { RED });
+                }
+            }
+        }
     }
 }
 
