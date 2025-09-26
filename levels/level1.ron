@@ -1,0 +1,11 @@
+(
+    name: "Level 1 - Tutorial",
+    difficulty: 1,
+    description: "Simple maze with basic corridors",
+    width: 16,
+    height: 16,
+    start_x: 3.5,
+    start_y: 3.5,
+    exit_x: 13.5,
+    exit_y: 13.5,
+)
