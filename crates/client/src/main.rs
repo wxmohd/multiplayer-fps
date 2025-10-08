@@ -1,914 +1,870 @@
 use macroquad::prelude::*;
 use std::net::UdpSocket;
-use std::time::Instant;
 use std::io::{self, Write};
-use std::f32::consts::PI;
+use std::time::{Duration, Instant};
 
-mod themes;
-use themes::{LevelTheme, ThemeConfig};
+mod renderer;
+mod assets;
+mod sprite_gen;
 
+use renderer::Renderer;
+use assets::AssetManager;
+
+// ----------------- constants -----------------
 const MAZE_WIDTH: usize = 16;
 const MAZE_HEIGHT: usize = 16;
 const CELL_SIZE: f32 = 64.0;
-const FOV: f32 = PI / 3.0; // 60 degrees field of view
+const FOV: f32 = std::f32::consts::PI / 3.0;
 const RENDER_DISTANCE: f32 = 1000.0;
+const TARGET_FPS: u32 = 60;
 
-#[derive(Clone, Copy)]
-struct Enemy {
-    x: f32,
-    y: f32,
-    angle: f32,
-    health: i32,
-    patrol_target_x: f32,
-    patrol_target_y: f32,
-    last_seen_player: Instant,
-    state: EnemyState,
-}
-
-#[derive(Clone, Copy)]
-enum EnemyState {
-    Patrolling,
-    Chasing,
-    Attacking,
-}
-
-impl Enemy {
-    fn new(x: f32, y: f32, angle: f32) -> Self {
-        Self {
-            x,
-            y,
-            angle,
-            health: 50,
-            patrol_target_x: x,
-            patrol_target_y: y,
-            last_seen_player: Instant::now(),
-            state: EnemyState::Patrolling,
-        }
-    }
-}
-
+// ----------------- game state -----------------
 struct GameState {
+    // player
     player_x: f32,
     player_y: f32,
     player_angle: f32,
+
+    // world
     maze: [[bool; MAZE_WIDTH]; MAZE_HEIGHT],
     level: usize,
-    score: i32,
     exit_x: f32,
     exit_y: f32,
+
+    // connection (echo/offline ok)
     server_addr: String,
     username: String,
+
+    // input
     mouse_sensitivity: f32,
     last_mouse_x: f32,
-    frame_start: Instant,
+
+    // perf
     frame_times: Vec<f32>,
-    health: i32,
-    ammo: i32,
-    game_won: bool,
     last_frame_time: Instant,
     fps_counter: f32,
+
+    // gameplay
+    health: i32,
+    ammo: i32,
+    score: i32,
+    game_won: bool,
+
+    // fx
     crosshair_pulse: f32,
     wall_hit_flash: f32,
-    enemies: Vec<Enemy>,
-    last_enemy_attack: Instant,
-    current_theme: LevelTheme,
+
+    // rendering
+    renderer: Renderer,
+
+    // assets
+    assets: AssetManager,
+
+    // viewmodel (weapon) – screen-space
+    gun_fire_t: f32,     // seconds left in muzzle flash
+    gun_recoil: f32,     // 0..1 recoil kick
+    gun_bob_phase: f32,  // walk/breath bob phase
 }
 
 impl GameState {
     fn new(username: String, server_addr: String) -> Self {
+        // simple perimeter maze with some columns
         let mut maze = [[false; MAZE_WIDTH]; MAZE_HEIGHT];
-        
-        // Create a simple maze (Level 1)
-        // Outer walls
-        for i in 0..MAZE_WIDTH {
-            maze[0][i] = true;
-            maze[MAZE_HEIGHT - 1][i] = true;
+        for x in 0..MAZE_WIDTH {
+            maze[0][x] = true;
+            maze[MAZE_HEIGHT - 1][x] = true;
         }
-        for i in 0..MAZE_HEIGHT {
-            maze[i][0] = true;
-            maze[i][MAZE_WIDTH - 1] = true;
+        for y in 0..MAZE_HEIGHT {
+            maze[y][0] = true;
+            maze[y][MAZE_WIDTH - 1] = true;
         }
-        
-        // Internal walls to create corridors
-        maze[2][2] = true; maze[2][3] = true; maze[2][4] = true;
-        maze[4][6] = true; maze[5][6] = true; maze[6][6] = true;
-        maze[8][2] = true; maze[8][3] = true; maze[8][4] = true; maze[8][5] = true;
-        maze[10][8] = true; maze[11][8] = true; maze[12][8] = true;
-        maze[6][10] = true; maze[7][10] = true; maze[8][10] = true;
-        maze[4][12] = true; maze[5][12] = true; maze[6][12] = true;
-        
+        maze[2][2] = true;
+        maze[2][3] = true;
+        maze[2][4] = true;
+        maze[4][6] = true;
+        maze[5][6] = true;
+        maze[6][6] = true;
+        maze[8][2] = true;
+        maze[8][3] = true;
+        maze[8][4] = true;
+        maze[8][5] = true;
+
         Self {
+            // player
             player_x: 3.5 * CELL_SIZE,
             player_y: 3.5 * CELL_SIZE,
             player_angle: 0.0,
+
+            // world
             maze,
+            level: 1,
             exit_x: 13.5 * CELL_SIZE,
             exit_y: 13.5 * CELL_SIZE,
+
+            // net
             server_addr,
             username,
+
+            // input
             mouse_sensitivity: 0.003,
             last_mouse_x: 0.0,
-            frame_start: Instant::now(),
+
+            // perf
             frame_times: Vec::with_capacity(60),
-            health: 100,
-            ammo: 30,
-            level: 1,
-            score: 0,
-            game_won: false,
             last_frame_time: Instant::now(),
             fps_counter: 60.0,
+
+            // gameplay
+            health: 100,
+            ammo: 30,
+            score: 0,
+            game_won: false,
+
+            // fx
             crosshair_pulse: 0.0,
             wall_hit_flash: 0.0,
-            enemies: Vec::new(),
-            last_enemy_attack: Instant::now(),
-            current_theme: LevelTheme::CandyMaze,
+
+            // rendering
+            renderer: Renderer::new(),
+
+            // assets
+            assets: AssetManager::new(),
+
+            // weapon
+            gun_fire_t: 0.0,
+            gun_recoil: 0.0,
+            gun_bob_phase: 0.0,
         }
     }
 
+    fn is_wall(&self, x: f32, y: f32) -> bool {
+        let gx = (x / CELL_SIZE) as usize;
+        let gy = (y / CELL_SIZE) as usize;
+        if gx >= MAZE_WIDTH || gy >= MAZE_HEIGHT {
+            return true;
+        }
+        self.maze[gy][gx]
+    }
+
+    fn advance_level(&mut self) {
+        self.level += 1;
+        self.score += 100;
+        if self.level > 3 {
+            self.game_won = true;
+            return;
+        }
+        self.player_x = 3.5 * CELL_SIZE;
+        self.player_y = 3.5 * CELL_SIZE;
+        self.player_angle = 0.0;
+
+        // Generate challenging but navigable maze
+        self.maze = [[false; MAZE_WIDTH]; MAZE_HEIGHT]; // Start with open space
+        
+        // Create border walls
+        for x in 0..MAZE_WIDTH {
+            self.maze[0][x] = true;
+            self.maze[MAZE_HEIGHT - 1][x] = true;
+        }
+        for y in 0..MAZE_HEIGHT {
+            self.maze[y][0] = true;
+            self.maze[y][MAZE_WIDTH - 1] = true;
+        }
+        
+        // Ensure player starting area is clear
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let px = 3 + dx;
+                let py = 3 + dy;
+                if px >= 0 && px < MAZE_WIDTH as i32 && py >= 0 && py < MAZE_HEIGHT as i32 {
+                    self.maze[py as usize][px as usize] = false;
+                }
+            }
+        }
+        
+        // Create strategic wall patterns based on level difficulty
+        let wall_density = match self.level {
+            1 => 0.50, // 50% walls - challenging
+            2 => 0.65, // 65% walls - very difficult
+            3 => 0.80, // 80% walls - extremely challenging
+            _ => 0.55,
+        };
+        
+        // Add walls in a pattern that creates corridors and dead ends
+        for y in 2..(MAZE_HEIGHT - 2) {
+            for x in 2..(MAZE_WIDTH - 2) {
+                // Skip player area
+                if (x as i32 - 3).abs() <= 2 && (y as i32 - 3).abs() <= 2 {
+                    continue;
+                }
+                
+                let noise = ((x * 7 + y * 13 + self.level as usize * 17) % 100) as f32 / 100.0;
+                if noise < wall_density {
+                    self.maze[y][x] = true;
+                }
+            }
+        }
+        
+        // Create fewer strategic corridors for increased difficulty
+        let corridor_spacing = match self.level {
+            1 => 4, // More corridors - easier navigation
+            2 => 6, // Fewer corridors - harder
+            3 => 8, // Very few corridors - most challenging
+            _ => 5,
+        };
+        
+        for i in 1..(MAZE_WIDTH - 1) {
+            if i % corridor_spacing == 0 {
+                // Horizontal corridors (less frequent)
+                for x in 1..(MAZE_WIDTH - 1) {
+                    if x % 3 == 0 {
+                        self.maze[i][x] = false;
+                    }
+                }
+            }
+        }
+        
+        for i in 1..(MAZE_HEIGHT - 1) {
+            if i % (corridor_spacing + 1) == 0 {
+                // Vertical corridors (even less frequent)
+                for y in 1..(MAZE_HEIGHT - 1) {
+                    if y % 3 == 0 {
+                        self.maze[y][i] = false;
+                    }
+                }
+            }
+        }
+        
+        // Add more dead ends and false paths based on level
+        let false_path_density = match self.level {
+            1 => 0.25,
+            2 => 0.40,
+            3 => 0.55,
+            _ => 0.30,
+        };
+        
+        for y in 3..(MAZE_HEIGHT - 3) {
+            for x in 3..(MAZE_WIDTH - 3) {
+                if !self.maze[y][x] {
+                    let noise = ((x * 11 + y * 17 + self.level as usize * 23) % 100) as f32 / 100.0;
+                    if noise < false_path_density {
+                        // Create a short dead end path
+                        let directions = [(0, 1), (1, 0), (0, -1), (-1, 0)];
+                        let dir_idx = (x + y + self.level as usize) % directions.len();
+                        let (dx, dy) = directions[dir_idx];
+                        
+                        for i in 1..=3 {
+                            let nx = x as i32 + dx * i;
+                            let ny = y as i32 + dy * i;
+                            if nx > 0 && nx < (MAZE_WIDTH - 1) as i32 && 
+                               ny > 0 && ny < (MAZE_HEIGHT - 1) as i32 {
+                                self.maze[ny as usize][nx as usize] = false;
+                            }
+                        }
+                        
+                        // Block the end to create dead end
+                        let end_x = x as i32 + dx * 4;
+                        let end_y = y as i32 + dy * 4;
+                        if end_x > 0 && end_x < (MAZE_WIDTH - 1) as i32 && 
+                           end_y > 0 && end_y < (MAZE_HEIGHT - 1) as i32 {
+                            self.maze[end_y as usize][end_x as usize] = true;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Ensure clear path to exit exists
+        let exit_x = MAZE_WIDTH - 3;
+        let exit_y = MAZE_HEIGHT - 3;
+        self.maze[exit_y][exit_x] = false;
+        
+        // Create guaranteed path from start to exit
+        let mut path_x = 3;
+        let mut path_y = 3;
+        
+        // Horizontal path first
+        while path_x < exit_x {
+            self.maze[path_y][path_x] = false;
+            self.maze[path_y + 1][path_x] = false; // Make corridor wider
+            path_x += 1;
+        }
+        
+        // Vertical path
+        while path_y < exit_y {
+            self.maze[path_y][path_x] = false;
+            self.maze[path_y][path_x - 1] = false; // Make corridor wider
+            path_y += 1;
+        }
+        
+        // Ensure exit area is clear
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let ex = exit_x as i32 + dx;
+                let ey = exit_y as i32 + dy;
+                if ex >= 1 && ex < (MAZE_WIDTH - 1) as i32 && ey >= 1 && ey < (MAZE_HEIGHT - 1) as i32 {
+                    self.maze[ey as usize][ex as usize] = false;
+                }
+            }
+        }
+
+        self.health = 100;
+        self.ammo = 30;
+    }
+
+    fn shoot(&mut self) {
+        if self.ammo <= 0 {
+            return;
+        }
+        self.ammo -= 1;
+        self.wall_hit_flash = 0.25;
+
+        // weapon feedback
+        self.gun_fire_t = 0.12; // 120 ms flash
+        self.gun_recoil = 1.0;  // max kick
+    }
+
     fn update(&mut self) {
-        // Calculate FPS with smoothing
+        // --- FPS / delta ---
         let now = Instant::now();
         let delta = now.duration_since(self.last_frame_time).as_secs_f32();
-        let current_fps = 1.0 / delta.max(0.001);
-        
-        // Add to frame times buffer for smooth FPS calculation
-        self.frame_times.push(current_fps);
+        self.last_frame_time = now;
+        let fps_now = 1.0 / delta.max(0.001);
+        self.frame_times.push(fps_now);
         if self.frame_times.len() > 60 {
             self.frame_times.remove(0);
         }
-        
-        // Calculate average FPS
         self.fps_counter = self.frame_times.iter().sum::<f32>() / self.frame_times.len() as f32;
-        self.last_frame_time = now;
 
-        // Update animations
+        // --- simple time values ---
         self.crosshair_pulse += delta * 3.0;
         self.wall_hit_flash = (self.wall_hit_flash - delta * 2.0).max(0.0);
 
-        // Mouse look (professional FPS controls)
-        let (mouse_x, _) = mouse_position();
+        // --- mouse look ---
+        let (mx, _) = mouse_position();
         if self.last_mouse_x != 0.0 {
-            let mouse_delta = mouse_x - self.last_mouse_x;
-            self.player_angle += mouse_delta * self.mouse_sensitivity;
+            self.player_angle += (mx - self.last_mouse_x) * self.mouse_sensitivity;
         }
-        self.last_mouse_x = mouse_x;
+        self.last_mouse_x = mx;
 
-        let move_speed = 200.0 * delta; // Increased for better feel
+        // --- movement ---
+        let move_speed = 200.0 * delta;
         let strafe_speed = 180.0 * delta;
+        let mut nx = self.player_x;
+        let mut ny = self.player_y;
 
-        // Professional FPS movement (WASD + mouse)
-        let mut new_x = self.player_x;
-        let mut new_y = self.player_y;
-
-        // Handle input
         if is_key_down(KeyCode::W) {
-            new_x += self.player_angle.cos() * move_speed;
-            new_y += self.player_angle.sin() * move_speed;
+            nx += self.player_angle.cos() * move_speed;
+            ny += self.player_angle.sin() * move_speed;
         }
         if is_key_down(KeyCode::S) {
-            new_x -= self.player_angle.cos() * move_speed;
-            new_y -= self.player_angle.sin() * move_speed;
+            nx -= self.player_angle.cos() * move_speed;
+            ny -= self.player_angle.sin() * move_speed;
+        }
+        // Arrow keys: Up/Down move forward/back just like W/S
+        if is_key_down(KeyCode::Up) {
+            nx += self.player_angle.cos() * move_speed;
+            ny += self.player_angle.sin() * move_speed;
+        }
+        if is_key_down(KeyCode::Down) {
+            nx -= self.player_angle.cos() * move_speed;
+            ny -= self.player_angle.sin() * move_speed;
         }
         if is_key_down(KeyCode::A) {
-            new_x += (self.player_angle - PI/2.0).cos() * strafe_speed;
-            new_y += (self.player_angle - PI/2.0).sin() * strafe_speed;
+            nx += (self.player_angle - std::f32::consts::PI / 2.0).cos() * strafe_speed;
+            ny += (self.player_angle - std::f32::consts::PI / 2.0).sin() * strafe_speed;
         }
         if is_key_down(KeyCode::D) {
-            new_x += (self.player_angle + PI/2.0).cos() * strafe_speed;
-            new_y += (self.player_angle + PI/2.0).sin() * strafe_speed;
+            nx += (self.player_angle + std::f32::consts::PI / 2.0).cos() * strafe_speed;
+            ny += (self.player_angle + std::f32::consts::PI / 2.0).sin() * strafe_speed;
         }
-        
-        // Debug: Cycle through themes with T key
-        if is_key_pressed(KeyCode::T) {
-            self.current_theme = match self.current_theme {
-                LevelTheme::CandyMaze => LevelTheme::Cyberpunk,
-                LevelTheme::Cyberpunk => LevelTheme::MoroccanBazaar,
-                LevelTheme::MoroccanBazaar => LevelTheme::CandyMaze,
-            };
-        }
-
-        // Arrow keys for keyboard-only players
         if is_key_down(KeyCode::Left) {
             self.player_angle -= 2.0 * delta;
         }
         if is_key_down(KeyCode::Right) {
             self.player_angle += 2.0 * delta;
         }
-        if is_key_down(KeyCode::Up) {
-            new_x += self.player_angle.cos() * move_speed;
-            new_y += self.player_angle.sin() * move_speed;
-        }
-        if is_key_down(KeyCode::Down) {
-            new_x -= self.player_angle.cos() * move_speed;
-            new_y -= self.player_angle.sin() * move_speed;
-        }
 
-        // Enhanced collision detection with wall hit feedback
-        if !self.is_wall(new_x, new_y) {
-            self.player_x = new_x;
-            self.player_y = new_y;
+        if !self.is_wall(nx, ny) {
+            self.player_x = nx;
+            self.player_y = ny;
         } else {
-            // Wall hit effect
             self.wall_hit_flash = 0.3;
         }
 
-        // Check if player reached the exit
-        let distance_to_exit = ((self.player_x - self.exit_x).powi(2) + (self.player_y - self.exit_y).powi(2)).sqrt();
-        if distance_to_exit < 40.0 {
+        // Theme switching removed - game maintains consistent design throughout
+
+        // exit trigger
+        let d_exit = ((self.player_x - self.exit_x).powi(2) + (self.player_y - self.exit_y).powi(2)).sqrt();
+        if d_exit < 40.0 {
             self.advance_level();
         }
 
-        // Shooting mechanics with enhanced feedback
-        if is_key_pressed(KeyCode::Space) && self.ammo > 0 {
+        // shooting
+        if is_key_pressed(KeyCode::Space) {
             self.shoot();
-            self.crosshair_pulse = 0.0; // Reset crosshair animation
         }
-        
-        // Update AI enemies
-        self.update_enemies(delta);
+
+        // --- weapon timers ---
+        // Drive weapon bob only from actual movement (not rotation): WASD + Up/Down
+        let moving = is_key_down(KeyCode::W)
+            || is_key_down(KeyCode::A)
+            || is_key_down(KeyCode::S)
+            || is_key_down(KeyCode::D)
+            || is_key_down(KeyCode::Up)
+            || is_key_down(KeyCode::Down);
+
+        if moving {
+            self.gun_bob_phase += delta * 6.0;
+        }
+        self.gun_fire_t = (self.gun_fire_t - delta).max(0.0);
+        self.gun_recoil = (self.gun_recoil - 3.2 * delta).max(0.0);
     }
 
-    fn is_wall(&self, x: f32, y: f32) -> bool {
-        let grid_x = (x / CELL_SIZE) as usize;
-        let grid_y = (y / CELL_SIZE) as usize;
-        
-        if grid_x >= MAZE_WIDTH || grid_y >= MAZE_HEIGHT {
-            return true;
-        }
-        
-        self.maze[grid_y][grid_x]
-    }
-
-    fn advance_level(&mut self) {
-        self.level += 1;
-        self.score += 100;
-        
-        if self.level > 3 {
-            self.game_won = true;
-            return;
-        }
-
-        // Reset player position
-        self.player_x = 3.5 * CELL_SIZE;
-        self.player_y = 3.5 * CELL_SIZE;
-        self.player_angle = 0.0;
-
-        // Update theme based on level
-        self.current_theme = LevelTheme::from_level(self.level);
-
-        // Generate new maze based on level
-        self.generate_maze_for_level(self.level as i32);
-        
-        // Spawn enemies for this level
-        self.spawn_enemies();
-        
-        // Reset health and ammo for new level
-        self.health = 100;
-        self.ammo = 30;
-    }
-
-    fn generate_maze_for_level(&mut self, level: i32) {
-        // Clear maze
-        self.maze = [[false; MAZE_WIDTH]; MAZE_HEIGHT];
-        
-        // Outer walls
-        for i in 0..MAZE_WIDTH {
-            self.maze[0][i] = true;
-            self.maze[MAZE_HEIGHT - 1][i] = true;
-        }
-        for i in 0..MAZE_HEIGHT {
-            self.maze[i][0] = true;
-            self.maze[i][MAZE_WIDTH - 1] = true;
-        }
-
-        match level {
-            1 => {
-                // Level 1: Simple maze
-                self.maze[2][2] = true; self.maze[2][3] = true; self.maze[2][4] = true;
-                self.maze[4][6] = true; self.maze[5][6] = true; self.maze[6][6] = true;
-                self.maze[8][2] = true; self.maze[8][3] = true; self.maze[8][4] = true; self.maze[8][5] = true;
-                self.maze[10][8] = true; self.maze[11][8] = true; self.maze[12][8] = true;
-                self.maze[6][10] = true; self.maze[7][10] = true; self.maze[8][10] = true;
-                self.maze[4][12] = true; self.maze[5][12] = true; self.maze[6][12] = true;
-            }
-            2 => {
-                // Level 2: More complex with dead ends
-                self.maze[2][2] = true; self.maze[2][3] = true; self.maze[2][4] = true; self.maze[2][5] = true;
-                self.maze[4][2] = true; self.maze[4][4] = true; self.maze[4][6] = true; self.maze[4][8] = true;
-                self.maze[6][2] = true; self.maze[6][3] = true; self.maze[6][5] = true; self.maze[6][7] = true; self.maze[6][9] = true;
-                self.maze[8][4] = true; self.maze[8][6] = true; self.maze[8][8] = true; self.maze[8][10] = true;
-                self.maze[10][2] = true; self.maze[10][4] = true; self.maze[10][6] = true; self.maze[10][8] = true; self.maze[10][10] = true;
-                self.maze[12][3] = true; self.maze[12][5] = true; self.maze[12][7] = true; self.maze[12][9] = true;
-            }
-            3 => {
-                // Level 3: Complex but navigable maze
-                // Create a more structured complex maze
-                self.maze[2][2] = true; self.maze[2][3] = true; self.maze[2][5] = true; self.maze[2][7] = true; self.maze[2][9] = true;
-                self.maze[3][4] = true; self.maze[3][6] = true; self.maze[3][8] = true; self.maze[3][10] = true;
-                self.maze[4][2] = true; self.maze[4][3] = true; self.maze[4][5] = true; self.maze[4][7] = true; self.maze[4][9] = true; self.maze[4][11] = true;
-                self.maze[5][4] = true; self.maze[5][6] = true; self.maze[5][8] = true; self.maze[5][10] = true; self.maze[5][12] = true;
-                self.maze[6][2] = true; self.maze[6][3] = true; self.maze[6][5] = true; self.maze[6][7] = true; self.maze[6][9] = true; self.maze[6][11] = true;
-                self.maze[7][4] = true; self.maze[7][6] = true; self.maze[7][8] = true; self.maze[7][10] = true;
-                self.maze[8][2] = true; self.maze[8][3] = true; self.maze[8][5] = true; self.maze[8][7] = true; self.maze[8][9] = true; self.maze[8][11] = true;
-                self.maze[9][4] = true; self.maze[9][6] = true; self.maze[9][8] = true; self.maze[9][10] = true; self.maze[9][12] = true;
-                self.maze[10][2] = true; self.maze[10][3] = true; self.maze[10][5] = true; self.maze[10][7] = true; self.maze[10][9] = true; self.maze[10][11] = true;
-                self.maze[11][4] = true; self.maze[11][6] = true; self.maze[11][8] = true; self.maze[11][10] = true;
-                self.maze[12][2] = true; self.maze[12][3] = true; self.maze[12][5] = true; self.maze[12][7] = true; self.maze[12][9] = true;
-                // Ensure clear path to exit
-                self.maze[13][12] = false; self.maze[12][13] = false; self.maze[13][13] = false;
-            }
-            _ => {}
-        }
-    }
-
-    fn shoot(&mut self) {
-        if self.ammo > 0 {
-            self.ammo -= 1;
-            // Add muzzle flash effect
-            self.wall_hit_flash = 0.2;
-            
-            // Check if we hit any enemies
-            let hit_enemy = self.check_enemy_hit();
-            if hit_enemy {
-                self.score += 50; // More points for hitting enemies
-            } else {
-                self.score += 10; // Base shooting points
-            }
-        }
-    }
-    
-    fn check_enemy_hit(&mut self) -> bool {
-        let ray_cos = self.player_angle.cos();
-        let ray_sin = self.player_angle.sin();
-        let player_x = self.player_x;
-        let player_y = self.player_y;
-        let player_angle = self.player_angle;
-        
-        for enemy in &mut self.enemies {
-            if enemy.health <= 0 { continue; }
-            
-            // Calculate distance to enemy
-            let dx = enemy.x - player_x;
-            let dy = enemy.y - player_y;
-            let distance = (dx * dx + dy * dy).sqrt();
-            
-            if distance > 300.0 { continue; } // Max shooting range
-            
-            // Check if enemy is in line of sight
-            let angle_to_enemy = dy.atan2(dx);
-            let angle_diff = (angle_to_enemy - player_angle).abs();
-            
-            if angle_diff < 0.1 { // Small angle tolerance for hitting
-                // Check for walls between player and enemy
-                let steps = (distance / 5.0) as i32;
-                let mut blocked = false;
-                
-                for i in 1..steps {
-                    let check_x = player_x + ray_cos * (i as f32 * 5.0);
-                    let check_y = player_y + ray_sin * (i as f32 * 5.0);
-                    let grid_x = (check_x / CELL_SIZE) as usize;
-                    let grid_y = (check_y / CELL_SIZE) as usize;
-                    
-                    if grid_x >= MAZE_WIDTH || grid_y >= MAZE_HEIGHT || self.maze[grid_y][grid_x] {
-                        blocked = true;
-                        break;
-                    }
-                }
-                
-                if !blocked {
-                    enemy.health -= 25; // Damage per hit
-                    return true;
-                }
-            }
-        }
-        false
-    }
-    
-    fn spawn_enemies(&mut self) {
-        self.enemies.clear();
-        let num_enemies = self.level + 1; // More enemies each level
-        
-        for i in 0..num_enemies {
-            // Find valid spawn positions (not in walls, not near player)
-            let mut attempts = 0;
-            while attempts < 50 {
-                let x = (4 + (i * 3) % 8) as f32 * CELL_SIZE + CELL_SIZE / 2.0;
-                let y = (4 + (i * 2) % 8) as f32 * CELL_SIZE + CELL_SIZE / 2.0;
-                
-                if !self.is_wall(x, y) {
-                    let distance_to_player = ((x - self.player_x).powi(2) + (y - self.player_y).powi(2)).sqrt();
-                    if distance_to_player > 200.0 { // Not too close to player
-                        self.enemies.push(Enemy::new(x, y, (i as f32 * PI / 2.0) % (2.0 * PI)));
-                        break;
-                    }
-                }
-                attempts += 1;
-            }
-        }
-    }
-    
-    fn update_enemies(&mut self, delta: f32) {
-        let player_pos = (self.player_x, self.player_y);
-        let maze = self.maze; // Copy maze for borrowing
-        
-        // Collect enemy updates to avoid borrowing issues
-        let mut enemy_updates = Vec::new();
-        let mut attack_occurred = false;
-        
-        for (i, enemy) in self.enemies.iter().enumerate() {
-            if enemy.health <= 0 { continue; }
-            
-            let distance_to_player = ((enemy.x - player_pos.0).powi(2) + (enemy.y - player_pos.1).powi(2)).sqrt();
-            
-            let mut new_enemy = *enemy;
-            
-            // AI State Machine
-            match enemy.state {
-                EnemyState::Patrolling => {
-                    // Simple patrol movement
-                    let move_speed = 50.0 * delta;
-                    let new_x = enemy.x + enemy.angle.cos() * move_speed;
-                    let new_y = enemy.y + enemy.angle.sin() * move_speed;
-                    
-                    // Check walls manually
-                    let grid_x = (new_x / CELL_SIZE) as usize;
-                    let grid_y = (new_y / CELL_SIZE) as usize;
-                    let is_wall = grid_x >= MAZE_WIDTH || grid_y >= MAZE_HEIGHT || maze[grid_y][grid_x];
-                    
-                    if !is_wall {
-                        new_enemy.x = new_x;
-                        new_enemy.y = new_y;
-                    } else {
-                        new_enemy.angle += PI / 2.0; // Turn 90 degrees
-                    }
-                    
-                    // Switch to chasing if player is close
-                    if distance_to_player < 150.0 {
-                        new_enemy.state = EnemyState::Chasing;
-                        new_enemy.last_seen_player = Instant::now();
-                    }
-                }
-                EnemyState::Chasing => {
-                    // Move towards player
-                    let angle_to_player = (player_pos.1 - enemy.y).atan2(player_pos.0 - enemy.x);
-                    new_enemy.angle = angle_to_player;
-                    
-                    let chase_speed = 80.0 * delta;
-                    let new_x = enemy.x + new_enemy.angle.cos() * chase_speed;
-                    let new_y = enemy.y + new_enemy.angle.sin() * chase_speed;
-                    
-                    // Check walls manually
-                    let grid_x = (new_x / CELL_SIZE) as usize;
-                    let grid_y = (new_y / CELL_SIZE) as usize;
-                    let is_wall = grid_x >= MAZE_WIDTH || grid_y >= MAZE_HEIGHT || maze[grid_y][grid_x];
-                    
-                    if !is_wall {
-                        new_enemy.x = new_x;
-                        new_enemy.y = new_y;
-                    }
-                    
-                    // Attack if very close
-                    if distance_to_player < 50.0 {
-                        new_enemy.state = EnemyState::Attacking;
-                    }
-                    
-                    // Return to patrol if player is far
-                    if distance_to_player > 200.0 {
-                        new_enemy.state = EnemyState::Patrolling;
-                    }
-                }
-                EnemyState::Attacking => {
-                    // Attack player
-                    if self.last_enemy_attack.elapsed().as_secs_f32() > 1.0 {
-                        attack_occurred = true;
-                    }
-                    
-                    // Return to chasing if not close enough
-                    if distance_to_player > 60.0 {
-                        new_enemy.state = EnemyState::Chasing;
-                    }
-                }
-            }
-            
-            enemy_updates.push((i, new_enemy));
-        }
-        
-        // Apply updates
-        for (i, updated_enemy) in enemy_updates {
-            if i < self.enemies.len() {
-                self.enemies[i] = updated_enemy;
-            }
-        }
-        
-        // Handle attack
-        if attack_occurred {
-            self.health -= 10;
-            self.last_enemy_attack = Instant::now();
-            self.wall_hit_flash = 0.5; // Red flash when hit
-        }
-        
-        // Remove dead enemies
-        self.enemies.retain(|e| e.health > 0);
-    }
-
-    fn draw(&self) {
-        clear_background(BLACK);
-
-        // Draw 3D first-person view (main viewport)
+    fn draw(&mut self) {
+        self.renderer.update_fps();
         self.draw_3d_view();
-        
-        // Draw mini-map in top-right corner
         self.draw_minimap();
-
-        // Draw FPS counter
-        draw_text(
-            &format!("FPS: {:.0}", self.fps_counter),
-            10.0,
-            30.0,
-            30.0,
-            WHITE,
-        );
-        self.draw_enhanced_hud();
+        self.renderer.draw_hud(self.level as u32, self.health, self.score);
+        
+        // Victory screen when all levels completed
+        if self.game_won {
+            self.draw_victory_screen();
+        }
+    }
+    
+    fn draw_victory_screen(&self) {
+        let sw = screen_width();
+        let sh = screen_height();
+        
+        // Dark overlay
+        draw_rectangle(0.0, 0.0, sw, sh, Color::from_rgba(0, 0, 0, 200));
+        
+        // Victory message
+        let title = "🎉 CONGRATULATIONS! 🎉";
+        let subtitle = "You have conquered all 3 levels!";
+        let stats = format!("Final Score: {} | Total Health: {}", self.score, self.health);
+        let instruction = "Press ESC to exit";
+        
+        // Title
+        let title_size = 48.0;
+        let title_width = measure_text(title, None, title_size as u16, 1.0).width;
+        draw_text(title, (sw - title_width) / 2.0, sh / 2.0 - 100.0, title_size, GOLD);
+        
+        // Subtitle
+        let subtitle_size = 32.0;
+        let subtitle_width = measure_text(subtitle, None, subtitle_size as u16, 1.0).width;
+        draw_text(subtitle, (sw - subtitle_width) / 2.0, sh / 2.0 - 40.0, subtitle_size, WHITE);
+        
+        // Stats
+        let stats_size = 24.0;
+        let stats_width = measure_text(&stats, None, stats_size as u16, 1.0).width;
+        draw_text(&stats, (sw - stats_width) / 2.0, sh / 2.0 + 20.0, stats_size, LIGHTGRAY);
+        
+        // Instruction
+        let inst_size = 20.0;
+        let inst_width = measure_text(instruction, None, inst_size as u16, 1.0).width;
+        draw_text(instruction, (sw - inst_width) / 2.0, sh / 2.0 + 80.0, inst_size, YELLOW);
+        
+        // Animated border
+        let pulse = (get_time() * 3.0).sin() * 0.3 + 0.7;
+        let border_color = Color::new(1.0, pulse as f32, 0.0, pulse as f32);
+        draw_rectangle_lines(50.0, sh / 2.0 - 150.0, sw - 100.0, 280.0, 4.0, border_color);
     }
 
     fn draw_3d_view(&self) {
-        let screen_width = screen_width();
-        let screen_height = screen_height();
-        let num_rays = 320;
-        let theme = self.current_theme.get_config();
-        
-        // Draw themed floor and ceiling
-        draw_rectangle(0.0, 0.0, screen_width, screen_height / 2.0, theme.ceiling_color);
-        draw_rectangle(0.0, screen_height / 2.0, screen_width, screen_height / 2.0, theme.floor_color);
-        
-        // Add theme-specific atmospheric effects
-        self.current_theme.draw_atmospheric_effects(&theme, self.crosshair_pulse);
-        
-        for i in 0..num_rays {
-            let ray_angle = self.player_angle - FOV / 2.0 + (i as f32 / num_rays as f32) * FOV;
-            
-            // Enhanced raycast with better precision
-            let mut distance = 0.0;
-            let ray_cos = ray_angle.cos();
-            let ray_sin = ray_angle.sin();
-            
-            while distance < RENDER_DISTANCE {
-                let test_x = self.player_x + ray_cos * distance;
-                let test_y = self.player_y + ray_sin * distance;
-                
-                if self.is_wall(test_x, test_y) {
+        let sw = screen_width();
+        let sh = screen_height();
+
+        clear_background(BLACK);
+
+        // ceiling
+        draw_rectangle(0.0, 0.0, sw, sh / 2.0, Renderer::get_sky_color(self.level as u32));
+        // floor
+        draw_rectangle(0.0, sh / 2.0, sw, sh / 2.0, Renderer::get_floor_color(self.level as u32));
+
+        // raycast walls as vertical columns
+        let rays = 320;
+        for i in 0..rays {
+            let ray_angle = self.player_angle - FOV / 2.0 + (i as f32 / rays as f32) * FOV;
+
+            // cast
+            let mut d = 0.0f32;
+            let rc = ray_angle.cos();
+            let rs = ray_angle.sin();
+            while d < RENDER_DISTANCE {
+                let tx = self.player_x + rc * d;
+                let ty = self.player_y + rs * d;
+                if self.is_wall(tx, ty) {
                     break;
                 }
-                distance += 1.0; // Higher precision
+                d += 1.0;
             }
-            
-            // Fish-eye correction
-            distance *= (ray_angle - self.player_angle).cos();
-            
-            // Calculate wall height with perspective
-            let wall_height = (screen_height * 0.6) / (distance / CELL_SIZE + 0.1);
-            let wall_top = (screen_height / 2.0) - wall_height / 2.0;
-            let wall_bottom = (screen_height / 2.0) + wall_height / 2.0;
-            
-            // Themed wall rendering with distance-based shading
-            let brightness_factor = 1.0 - (distance / 500.0).min(1.0);
-            let wall_color = self.current_theme.get_wall_color(&theme, brightness_factor, i);
-            
-            // Draw wall with thickness for better appearance
-            let x = (i as f32 / num_rays as f32) * screen_width;
-            let line_width = (screen_width / num_rays as f32).max(1.0);
-            
-            draw_rectangle(x, wall_top, line_width, wall_bottom - wall_top, wall_color);
-            
-            // Add wall edge highlighting for wireframe effect
-            if i % 8 == 0 || distance < 100.0 {
-                draw_line(x, wall_top, x, wall_bottom, 1.0, Color::from_rgba(255, 255, 255, 100));
-            }
-        }
-        
-        // Add screen flash effect for wall hits
-        if self.wall_hit_flash > 0.0 {
-            let flash_alpha = (self.wall_hit_flash * 100.0) as u8;
-            draw_rectangle(0.0, 0.0, screen_width, screen_height, Color::from_rgba(255, 100, 100, flash_alpha));
-        }
-        
-        // Draw enemies in 3D view
-        self.draw_enemies_3d();
-        
-        // Draw professional crosshair
-        self.draw_crosshair();
-        
-        // Enhanced HUD with professional styling
-        self.draw_enhanced_hud();
-    }
-    
-    fn draw_enhanced_hud(&self) {
-        let screen_width = screen_width();
-        let screen_height = screen_height();
-        let theme = self.current_theme.get_config();
-        
-        // Themed HUD background
-        let hud_height = 120.0;
-        let hud_y = screen_height - hud_height;
-        
-        // Semi-transparent background with themed border
-        draw_rectangle(0.0, hud_y, screen_width, hud_height, Color::from_rgba(0, 0, 0, 180));
-        draw_rectangle_lines(0.0, hud_y, screen_width, hud_height, 2.0, theme.hud_primary);
-        
-        // FPS Counter with themed colors
-        let fps_color = if self.fps_counter >= 60.0 {
-            theme.hud_accent  // Good FPS
-        } else if self.fps_counter >= 30.0 {
-            theme.hud_secondary  // Okay FPS
-        } else {
-            Color::from_rgba(255, 0, 0, 255)  // Red for poor FPS
-        };
-        
-        draw_text(&format!("FPS: {:.0}", self.fps_counter), 20.0, hud_y + 25.0, 20.0, fps_color);
-        
-        // Themed player info
-        draw_text(&format!("PILOT: {}", self.username), 15.0, 55.0, 18.0, theme.text_primary);
-        draw_text(&format!("LEVEL: {} | SCORE: {}", self.level, self.score), 15.0, 75.0, 18.0, theme.text_secondary);
-        
-        // Health and ammo bars
-        let health_width = (self.health as f32 / 100.0) * 100.0;
-        let ammo_width = (self.ammo as f32 / 30.0) * 100.0;
-        
-        // Themed health bar
-        draw_text("HEALTH:", 15.0, 100.0, 16.0, theme.text_primary);
-        draw_rectangle(80.0, 88.0, 100.0, 12.0, Color::from_rgba(100, 0, 0, 200));
-        draw_rectangle(80.0, 88.0, health_width, 12.0, if self.health > 50 { theme.hud_accent } else { Color::from_rgba(255, 0, 0, 255) });
-        draw_rectangle_lines(80.0, 88.0, 100.0, 12.0, 1.0, theme.hud_primary);
-        
-        // Themed ammo bar
-        draw_text("AMMO:", 200.0, 100.0, 16.0, theme.text_primary);
-        draw_rectangle(250.0, 88.0, 100.0, 12.0, Color::from_rgba(100, 100, 0, 200));
-        draw_rectangle(250.0, 88.0, ammo_width, 12.0, if self.ammo > 10 { theme.hud_secondary } else { Color::from_rgba(255, 0, 0, 255) });
-        draw_rectangle_lines(250.0, 88.0, 100.0, 12.0, 1.0, theme.hud_primary);
-        
-        // Themed mission status
-        if self.game_won {
-            let text = "🎉 MISSION COMPLETE! ALL LEVELS CLEARED! 🎉";
-            let text_width = measure_text(text, None, 28, 1.0).width;
-            draw_rectangle(screen_width/2.0 - text_width/2.0 - 10.0, screen_height/2.0 - 20.0, text_width + 20.0, 40.0, Color::from_rgba(0, 100, 0, 200));
-            draw_text(text, screen_width/2.0 - text_width/2.0, screen_height/2.0, 28.0, theme.hud_accent);
-        } else {
-            let objective_text = self.current_theme.get_objective_text();
-            draw_text(objective_text, 15.0, screen_height - 80.0, 18.0, theme.text_secondary);
-        }
-        
-        // Themed controls help
-        draw_rectangle(5.0, screen_height - 60.0, 450.0, 55.0, Color::from_rgba(0, 0, 0, 150));
-        draw_rectangle_lines(5.0, screen_height - 60.0, 450.0, 55.0, 1.0, theme.hud_primary);
-        draw_text("CONTROLS: WASD/Mouse=Move | SPACE=Shoot | T=Theme", 15.0, screen_height - 40.0, 16.0, theme.text_primary);
-        draw_text("STATUS: Connected to Combat Network", 15.0, screen_height - 20.0, 16.0, theme.hud_accent);
-    }
-    
-    fn draw_crosshair(&self) {
-        let center_x = screen_width() / 2.0;
-        let center_y = screen_height() / 2.0;
-        let size = 15.0 + (self.crosshair_pulse.sin() * 3.0);
-        let thickness = 2.0;
-        let theme = self.current_theme.get_config();
-        
-        // Themed animated crosshair with pulse effect
-        let alpha = if self.ammo > 0 { 200 } else { 100 };
-        let color = if self.ammo > 0 { 
-            Color::from_rgba((theme.hud_accent.r * 255.0) as u8, (theme.hud_accent.g * 255.0) as u8, (theme.hud_accent.b * 255.0) as u8, alpha) 
-        } else { 
-            Color::from_rgba(255, 0, 0, alpha) 
-        };
-        
-        // Draw crosshair lines
-        draw_line(center_x - size, center_y, center_x - 5.0, center_y, thickness, color);
-        draw_line(center_x + 5.0, center_y, center_x + size, center_y, thickness, color);
-        draw_line(center_x, center_y - size, center_x, center_y - 5.0, thickness, color);
-        draw_line(center_x, center_y + 5.0, center_x, center_y + size, thickness, color);
-        
-        // Center dot
-        draw_circle(center_x, center_y, 1.5, color);
-    }
 
-    fn cast_ray(&self, angle: f32) -> (f32, f32, f32) {
-        let mut distance = 0.0;
-        let step_size = 2.0;
-        let max_distance = CELL_SIZE * 20.0;
-        
-        while distance < max_distance {
-            let x = self.player_x + angle.cos() * distance;
-            let y = self.player_y + angle.sin() * distance;
+            // fish-eye fix
+            d *= (ray_angle - self.player_angle).cos();
+
+            // projected column - make walls much taller for immersive maze experience
+            let wall_h = (sh * 2.5) / (d / CELL_SIZE + 0.1);
+            let wall_top = (sh / 2.0) - wall_h / 2.0;
+            let wall_bottom = wall_top + wall_h;
+
+            let brightness = 1.0; // constant (no distance darken, per request)
             
-            if self.is_wall(x, y) {
-                return (distance, x, y);
+            // Draw realistic textured walls instead of plain blocks
+            let x = (i as f32 / rays as f32) * sw;
+            let w = (sw / rays as f32).max(1.0);
+            self.draw_textured_wall_column(x, wall_top, w, wall_bottom - wall_top, self.level as u32, i);
+        }
+
+        // Enhanced exit proximity indicator
+        let dx = self.exit_x - self.player_x;
+        let dy = self.exit_y - self.player_y;
+        let dist = (dx * dx + dy * dy).sqrt();
+        
+        // Show different indicators based on distance
+        if dist < 300.0 {
+            let ang = dy.atan2(dx);
+            let mut rel = ang - self.player_angle;
+            while rel > std::f32::consts::PI {
+                rel -= 2.0 * std::f32::consts::PI;
+            }
+            while rel < -std::f32::consts::PI {
+                rel += 2.0 * std::f32::consts::PI;
             }
             
-            distance += step_size;
+            // Direction arrow when exit is in view
+            if rel.abs() < 0.4 {
+                let pulse = (get_time() * 6.0).sin() * 0.3 + 0.7;
+                let intensity = (300.0 - dist) / 300.0; // Stronger as you get closer
+                let col = Color::new(1.0, pulse as f32 * intensity, 0.0, intensity);
+                
+                // Draw pulsing arrow pointing to exit
+                let arrow_x = sw / 2.0 + rel * 100.0;
+                let arrow_y = sh / 2.0 - 60.0;
+                draw_circle(arrow_x, arrow_y, 6.0 + pulse as f32 * 4.0, col);
+                
+                // Distance text
+                let dist_text = format!("EXIT: {:.0}m", dist / CELL_SIZE);
+                draw_text(&dist_text, sw / 2.0 - 40.0, sh - 100.0, 20.0, col);
+            }
+            
+            // Compass-style indicator when exit is not in direct view
+            else {
+                let pulse = (get_time() * 4.0).sin() * 0.2 + 0.8;
+                let intensity = (300.0 - dist) / 300.0;
+                let col = Color::new(0.8, 0.8 * pulse as f32, 0.0, intensity * 0.7);
+                
+                // Draw compass arrow
+                let compass_x = sw - 80.0;
+                let compass_y = 80.0;
+                let arrow_len = 25.0;
+                let end_x = compass_x + rel.cos() * arrow_len;
+                let end_y = compass_y + rel.sin() * arrow_len;
+                
+                draw_circle(compass_x, compass_y, 30.0, Color::new(0.2, 0.2, 0.2, 0.8));
+                draw_line(compass_x, compass_y, end_x, end_y, 3.0, col);
+                draw_circle(end_x, end_y, 4.0, col);
+                draw_text("EXIT", compass_x - 15.0, compass_y + 45.0, 16.0, col);
+            }
         }
-        
-        (max_distance, 0.0, 0.0)
+
+        // hit flash vignette
+        if self.wall_hit_flash > 0.0 {
+            let a = (self.wall_hit_flash * 100.0) as u8;
+            draw_rectangle(0.0, 0.0, sw, sh, Color::from_rgba(255, 60, 60, a));
+        }
+
+        // crosshair
+        let cx = sw / 2.0;
+        let cy = sh / 2.0;
+        let s = 12.0;
+        let th = 2.0;
+        let c = WHITE;
+        draw_line(cx - s, cy, cx - 4.0, cy, th, c);
+        draw_line(cx + 4.0, cy, cx + s, cy, th, c);
+        draw_line(cx, cy - s, cx, cy - 4.0, th, c);
+        draw_line(cx, cy + 4.0, cx, cy + s, th, c);
+        draw_circle(cx, cy, 1.5, c);
+
+        // screen-space weapon (viewmodel) — faces forward
+        Renderer::draw_weapon(
+            self.level as u32,
+            self.gun_fire_t,
+            self.gun_recoil,
+            self.gun_bob_phase,
+            self.ammo,
+            &self.assets,
+        );
     }
 
     fn draw_minimap(&self) {
-        let map_size = 180.0;
-        let map_x = screen_width() - map_size - 10.0;
-        let map_y = 10.0;
-        let cell_size = map_size / MAZE_WIDTH as f32;
+        let size = 180.0;
+        let mx = screen_width() - size - 10.0;
+        let my = 10.0;
+        let cell = size / MAZE_WIDTH as f32;
+
+        // Enhanced minimap background with modern level-themed colors
+        let bg_color = match self.level {
+            1 => Color::from_rgba(245, 245, 240, 120),   // Clean white stone
+            2 => Color::from_rgba(45, 55, 70, 120),      // Modern tech blue-gray
+            3 => Color::from_rgba(240, 248, 255, 120),   // Elegant crystal blue
+            _ => Color::from_rgba(0, 0, 30, 120),
+        };
         
-        // Draw minimap background with enhanced styling
-        draw_rectangle(map_x - 5.0, map_y - 25.0, map_size + 10.0, map_size + 30.0, Color::from_rgba(0, 0, 0, 180));
-        draw_rectangle_lines(map_x - 5.0, map_y - 25.0, map_size + 10.0, map_size + 30.0, 2.0, Color::from_rgba(0, 255, 255, 150));
-        draw_rectangle(map_x, map_y, map_size, map_size, Color::from_rgba(0, 0, 30, 200));
-        draw_rectangle_lines(map_x, map_y, map_size, map_size, 2.0, BLUE);
+        draw_rectangle(mx - 5.0, my - 25.0, size + 10.0, size + 30.0, Color::from_rgba(0, 0, 0, 200));
+        draw_rectangle(mx, my, size, size, bg_color);
+        draw_rectangle_lines(mx, my, size, size, 3.0, WHITE);
         
-        // Draw maze walls with better visibility
+        // Title
+        draw_text("MAZE MAP", mx + 5.0, my - 8.0, 16.0, WHITE);
+
+        // Draw maze walls with accurate scaling
         for y in 0..MAZE_HEIGHT {
             for x in 0..MAZE_WIDTH {
                 if self.maze[y][x] {
+                    let wall_color = match self.level {
+                        1 => Color::from_rgba(160, 82, 45, 255),   // Saddle brown
+                        2 => Color::from_rgba(70, 130, 180, 255),  // Steel blue
+                        3 => Color::from_rgba(147, 112, 219, 255), // Medium purple
+                        _ => Color::from_rgba(100, 150, 255, 255),
+                    };
                     draw_rectangle(
-                        map_x + x as f32 * cell_size,
-                        map_y + y as f32 * cell_size,
-                        cell_size,
-                        cell_size,
-                        Color::from_rgba(100, 150, 255, 255),
+                        mx + x as f32 * cell,
+                        my + y as f32 * cell,
+                        cell,
+                        cell,
+                        wall_color,
                     );
                 }
             }
         }
+
+        // Exit indicator - pulsing red dot
+        let pulse = (get_time() * 4.0).sin() * 0.3 + 0.7;
+        let ex = mx + (self.exit_x / CELL_SIZE) * cell;
+        let ey = my + (self.exit_y / CELL_SIZE) * cell;
+        draw_rectangle(ex, ey, cell, cell, Color::new(1.0, pulse as f32 * 0.5, 0.0, 1.0));
+        draw_text("EXIT", ex - 8.0, ey - 5.0, 12.0, WHITE);
+
+        // Player position - accurate positioning with cell centering
+        let px = mx + (self.player_x / CELL_SIZE) * cell;
+        let py = my + (self.player_y / CELL_SIZE) * cell;
         
-        // Draw exit with pulsing effect
-        let exit_map_x = map_x + (self.exit_x / CELL_SIZE) * cell_size;
-        let exit_map_y = map_y + (self.exit_y / CELL_SIZE) * cell_size;
-        let pulse = (self.crosshair_pulse * 2.0).sin() * 0.3 + 0.7;
-        draw_rectangle(exit_map_x, exit_map_y, cell_size, cell_size, 
-                      Color::from_rgba((255.0 * pulse) as u8, 0, 0, 255));
+        // Player dot - bright and visible
+        draw_circle(px, py, 4.0, Color::new(0.0, 1.0, 0.0, 1.0)); // Bright green
         
-        // Draw player position and direction
-        let player_map_x = map_x + (self.player_x / CELL_SIZE) * cell_size + cell_size / 2.0;
-        let player_map_y = map_y + (self.player_y / CELL_SIZE) * cell_size + cell_size / 2.0;
-        
-        // Player dot with glow effect
-        draw_circle(player_map_x, player_map_y, 6.0, Color::from_rgba(255, 255, 0, 100));
-        draw_circle(player_map_x, player_map_y, 4.0, YELLOW);
-        
-        // Direction indicator
+        // Player direction indicator - accurate angle representation
         let dir_length = 12.0;
-        let end_x = player_map_x + self.player_angle.cos() * dir_length;
-        let end_y = player_map_y + self.player_angle.sin() * dir_length;
-        draw_line(player_map_x, player_map_y, end_x, end_y, 3.0, Color::from_rgba(255, 255, 0, 200));
+        let dir_x = px + self.player_angle.cos() * dir_length;
+        let dir_y = py + self.player_angle.sin() * dir_length;
+        draw_line(px, py, dir_x, dir_y, 3.0, Color::new(1.0, 1.0, 0.0, 1.0)); // Bright yellow
         
-        // Draw enemies on minimap
-        for enemy in &self.enemies {
-            if enemy.health > 0 {
-                let enemy_map_x = map_x + (enemy.x / CELL_SIZE) * cell_size + cell_size / 2.0;
-                let enemy_map_y = map_y + (enemy.y / CELL_SIZE) * cell_size + cell_size / 2.0;
-                
-                // Enemy dot (red for hostile)
-                draw_circle(enemy_map_x, enemy_map_y, 3.0, RED);
-                
-                // Direction indicator for enemy
-                let enemy_dir_length = 6.0;
-                let enemy_end_x = enemy_map_x + enemy.angle.cos() * enemy_dir_length;
-                let enemy_end_y = enemy_map_y + enemy.angle.sin() * enemy_dir_length;
-                draw_line(enemy_map_x, enemy_map_y, enemy_end_x, enemy_end_y, 1.0, RED);
-            }
-        }
+        // Direction arrow tip
+        let arrow_size = 3.0;
+        let arrow_angle1 = self.player_angle + 2.5;
+        let arrow_angle2 = self.player_angle - 2.5;
+        let arrow_x1 = dir_x - arrow_angle1.cos() * arrow_size;
+        let arrow_y1 = dir_y - arrow_angle1.sin() * arrow_size;
+        let arrow_x2 = dir_x - arrow_angle2.cos() * arrow_size;
+        let arrow_y2 = dir_y - arrow_angle2.sin() * arrow_size;
         
-        // Enhanced minimap title
-        draw_text("TACTICAL MAP", map_x, map_y - 8.0, 16.0, Color::from_rgba(0, 255, 255, 255));
+        draw_line(dir_x, dir_y, arrow_x1, arrow_y1, 2.0, Color::new(1.0, 1.0, 0.0, 1.0));
+        draw_line(dir_x, dir_y, arrow_x2, arrow_y2, 2.0, Color::new(1.0, 1.0, 0.0, 1.0));
+        
+        // Player coordinates display
+        let coord_text = format!("X:{:.1} Y:{:.1}", self.player_x / CELL_SIZE, self.player_y / CELL_SIZE);
+        draw_text(&coord_text, mx, my + size + 15.0, 14.0, WHITE);
     }
     
-    fn draw_enemies_3d(&self) {
-        let screen_width = screen_width();
-        let screen_height = screen_height();
+    
+    fn draw_stone_wall_column(&self, x: f32, y: f32, width: f32, height: f32, column_index: usize) {
+        // Modern minimalist stone - clean geometric design
+        let base_color = Color::from_rgba(245, 245, 240, 255); // Warm white stone
+        draw_rectangle(x, y, width, height, base_color);
         
-        for enemy in &self.enemies {
-            if enemy.health <= 0 { continue; }
+        // Subtle geometric patterns
+        let panel_height = 25.0;
+        let mut panel_y = y;
+        let mut panel_row = 0;
+        
+        while panel_y < y + height {
+            let remaining_height = (y + height - panel_y).min(panel_height);
             
-            // Calculate distance and angle to enemy
-            let dx = enemy.x - self.player_x;
-            let dy = enemy.y - self.player_y;
-            let distance = (dx * dx + dy * dy).sqrt();
+            // Clean separation lines
+            draw_rectangle(x, panel_y, width, 1.0, Color::from_rgba(220, 220, 215, 255));
             
-            if distance > 500.0 { continue; } // Don't render distant enemies
-            
-            // Check if enemy is in field of view
-            let angle_to_enemy = dy.atan2(dx);
-            let angle_diff = angle_to_enemy - self.player_angle;
-            let normalized_angle = ((angle_diff + PI) % (2.0 * PI)) - PI;
-            
-            if normalized_angle.abs() < FOV / 2.0 {
-                // Check if enemy is visible (not behind walls)
-                let steps = (distance / 5.0) as i32;
-                let mut visible = true;
-                
-                for i in 1..steps {
-                    let check_x = self.player_x + (dx / distance) * (i as f32 * 5.0);
-                    let check_y = self.player_y + (dy / distance) * (i as f32 * 5.0);
-                    if self.is_wall(check_x, check_y) {
-                        visible = false;
-                        break;
-                    }
-                }
-                
-                if visible {
-                    // Calculate screen position
-                    let screen_x = screen_width / 2.0 + (normalized_angle / FOV) * screen_width;
-                    
-                    // Enemy size based on distance (closer = bigger)
-                    let enemy_size = (30.0 / (distance / 100.0)).min(50.0).max(5.0);
-                    let enemy_y = screen_height / 2.0;
-                    
-                    // Draw enemy as an "eye" (classic Maze Wars style)
-                    let eye_color = match enemy.state {
-                        EnemyState::Patrolling => Color::from_rgba(255, 255, 0, 200), // Yellow
-                        EnemyState::Chasing => Color::from_rgba(255, 100, 0, 255),    // Orange
-                        EnemyState::Attacking => Color::from_rgba(255, 0, 0, 255),   // Red
-                    };
-                    
-                    // Draw enemy eye
-                    draw_circle(screen_x, enemy_y, enemy_size / 2.0, eye_color);
-                    draw_circle(screen_x, enemy_y, enemy_size / 4.0, BLACK); // Pupil
-                    
-                    // Health bar above enemy
-                    let health_ratio = enemy.health as f32 / 50.0;
-                    let bar_width = enemy_size;
-                    let bar_height = 4.0;
-                    let bar_y = enemy_y - enemy_size / 2.0 - 10.0;
-                    
-                    draw_rectangle(screen_x - bar_width / 2.0, bar_y, bar_width, bar_height, Color::from_rgba(100, 0, 0, 200));
-                    draw_rectangle(screen_x - bar_width / 2.0, bar_y, bar_width * health_ratio, bar_height, 
-                                 if health_ratio > 0.5 { GREEN } else { RED });
-                }
+            // Subtle depth variation
+            if column_index % 3 == 0 {
+                draw_rectangle(x + 2.0, panel_y + 2.0, width - 4.0, remaining_height - 3.0, Color::from_rgba(235, 235, 230, 255));
             }
+            
+            // Modern accent lines
+            if panel_row % 2 == 0 {
+                draw_rectangle(x, panel_y + remaining_height * 0.7, width, 1.0, Color::from_rgba(200, 200, 195, 255));
+            }
+            
+            panel_y += panel_height;
+            panel_row += 1;
         }
+    }
+    
+    fn draw_metal_wall_column(&self, x: f32, y: f32, width: f32, height: f32, column_index: usize) {
+        // Modern tech aesthetic - sleek and professional
+        let base_color = Color::from_rgba(45, 55, 70, 255); // Deep blue-gray
+        draw_rectangle(x, y, width, height, base_color);
+        
+        // Clean tech panels
+        let panel_height = 35.0;
+        let mut panel_y = y;
+        
+        while panel_y < y + height {
+            let remaining_height = (y + height - panel_y).min(panel_height);
+            
+            // Sleek panel borders
+            draw_rectangle(x, panel_y, width, 1.0, Color::from_rgba(120, 140, 180, 255));
+            draw_rectangle(x, panel_y + remaining_height - 1.0, width, 1.0, Color::from_rgba(120, 140, 180, 255));
+            
+            // Modern accent strips
+            if column_index % 3 == 0 {
+                draw_rectangle(x + 2.0, panel_y + 5.0, width - 4.0, 2.0, Color::from_rgba(100, 150, 255, 180));
+            }
+            
+            // Subtle tech details
+            if column_index % 5 == 0 {
+                draw_rectangle(x + width * 0.1, panel_y + remaining_height * 0.3, 2.0, 2.0, Color::from_rgba(150, 200, 255, 200));
+                draw_rectangle(x + width * 0.9 - 2.0, panel_y + remaining_height * 0.7, 2.0, 2.0, Color::from_rgba(150, 200, 255, 200));
+            }
+            
+            panel_y += panel_height;
+        }
+    }
+    
+    fn draw_crystal_wall_column(&self, x: f32, y: f32, width: f32, height: f32, column_index: usize) {
+        // Elegant modern crystal - sophisticated and clean
+        let base_color = Color::from_rgba(240, 248, 255, 255); // Alice blue - very clean
+        draw_rectangle(x, y, width, height, base_color);
+        
+        // Geometric crystal patterns
+        let crystal_height = 28.0;
+        let mut crystal_y = y;
+        
+        while crystal_y < y + height {
+            let remaining_height = (y + height - crystal_y).min(crystal_height);
+            
+            // Modern geometric facets
+            if column_index % 2 == 0 {
+                draw_rectangle(x + 1.0, crystal_y + 1.0, width * 0.25, remaining_height - 2.0, Color::from_rgba(220, 235, 255, 255));
+                draw_rectangle(x + width * 0.75, crystal_y + 1.0, width * 0.24, remaining_height - 2.0, Color::from_rgba(220, 235, 255, 255));
+            }
+            
+            // Subtle energy lines (no harsh pulsing)
+            let subtle_glow = (get_time() * 1.0 + column_index as f64 * 0.2).sin() * 0.1 + 0.9;
+            let energy_color = Color::new(0.4, 0.7, 1.0, subtle_glow as f32 * 0.3);
+            draw_rectangle(x + width * 0.5 - 0.5, crystal_y, 1.0, remaining_height, energy_color);
+            
+            // Clean separation lines
+            draw_rectangle(x, crystal_y, width, 1.0, Color::from_rgba(200, 220, 240, 255));
+            
+            crystal_y += crystal_height;
+        }
+    }
+
+    fn draw_textured_wall_column(&self, x: f32, y: f32, width: f32, height: f32, level: u32, column_index: usize) {
+        match level {
+            1 => self.draw_stone_wall_column(x, y, width, height, column_index),
+            2 => self.draw_metal_wall_column(x, y, width, height, column_index),
+            3 => self.draw_crystal_wall_column(x, y, width, height, column_index),
+            _ => draw_rectangle(x, y, width, height, GRAY),
+        }
+    }
+}
+
+// ----------------- boilerplate: input & window -----------------
+fn window_conf() -> Conf {
+    Conf {
+        window_title: "Multiplayer FPS".to_owned(),
+        window_width: 1280,
+        window_height: 720,
+        high_dpi: false,
+        fullscreen: false,
+        sample_count: 1,
+        window_resizable: true,
+        icon: None,
+        platform: Default::default(),
     }
 }
 
 fn get_user_input() -> Result<(String, String), Box<dyn std::error::Error>> {
     println!("=== Multiplayer FPS Client ===");
-    
-    // Prompt for server IP
-    print!("Enter IP Address: ");
+    print!("Enter IP Address (e.g. 127.0.0.1:34254): ");
     io::stdout().flush().unwrap();
-    let mut ip_input = String::new();
-    io::stdin().read_line(&mut ip_input).unwrap();
-    let server_ip = ip_input.trim();
-    
-    // Default to localhost if empty
-    let server_addr = if server_ip.is_empty() {
+    let mut ip = String::new();
+    io::stdin().read_line(&mut ip)?;
+    let server_addr = if ip.trim().is_empty() {
         "127.0.0.1:34254".to_string()
     } else {
-        server_ip.to_string()
+        ip.trim().to_string()
     };
-    
-    // Prompt for username
+
     print!("Enter Name: ");
     io::stdout().flush().unwrap();
-    let mut name_input = String::new();
-    io::stdin().read_line(&mut name_input).unwrap();
-    let username = name_input.trim().to_string();
-    
+    let mut name = String::new();
+    io::stdin().read_line(&mut name)?;
+    let username = name.trim().to_string();
+
     println!("Starting...");
     println!("Connecting to server: {}", server_addr);
     println!("Username: {}", username);
-    
-    Ok((username, server_addr))
-}
 
-fn window_conf() -> Conf {
-    Conf {
-        window_title: "Multiplayer FPS".to_owned(),
-        window_width: 800,
-        window_height: 600,
-        ..Default::default()
-    }
+    Ok((username, server_addr))
 }
 
 #[macroquad::main(window_conf)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (username, server_addr) = get_user_input()?;
-    
-    // Try to connect to server
+
+    // lightweight UDP echo connect (ok if it fails — offline mode)
     match UdpSocket::bind("0.0.0.0:0") {
         Ok(socket) => {
-            if let Ok(_) = socket.connect(&server_addr) {
-                let connect_msg = format!("CONNECT:{}", username);
-                let _ = socket.send(connect_msg.as_bytes());
+            if socket.connect(&server_addr).is_ok() {
+                let _ = socket.send(format!("CONNECT:{}", username).as_bytes());
                 println!("Connected to server!");
             } else {
-                println!("Warning: Could not connect to server, running in offline mode");
+                println!("Warning: Could not connect to server (offline mode).");
             }
         }
-        Err(_) => {
-            println!("Warning: Could not create socket, running in offline mode");
-        }
+        Err(_) => println!("Warning: Could not open UDP socket (offline mode)."),
     }
 
-    let mut game_state = GameState::new(username, server_addr);
+    let mut gs = GameState::new(username, server_addr);
+    
+    // Load assets
+    if let Err(e) = gs.assets.load_weapon_sprites().await {
+        println!("Warning: Failed to load weapon sprites: {}", e);
+    }
+    if let Err(e) = gs.assets.load_ui_sprites().await {
+        println!("Warning: Failed to load UI sprites: {}", e);
+    }
+
+    // frame limiter
+    let target_frame = Duration::from_secs_f64(1.0 / TARGET_FPS as f64);
 
     loop {
-        game_state.update();
-        game_state.draw();
+        let start = Instant::now();
+
+        // Check for ESC key to exit (especially important for victory screen)
+        if is_key_pressed(KeyCode::Escape) {
+            break Ok(());
+        }
+
+        gs.update();
+        gs.draw();
+
+        let elapsed = start.elapsed();
+        if elapsed < target_frame {
+            std::thread::sleep(target_frame - elapsed);
+        }
+
         next_frame().await;
     }
 }
