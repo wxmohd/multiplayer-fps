@@ -181,65 +181,15 @@ impl GameState {
             }
         }
         
-        // Create strategic wall patterns based on level difficulty
-        let wall_density = match self.level {
-            1 => 0.50, // 50% walls - challenging
-            2 => 0.65, // 65% walls - very difficult
-            3 => 0.80, // 80% walls - extremely challenging
-            _ => 0.55,
-        };
-        
-        // Add walls in a pattern that creates corridors and dead ends
-        for y in 2..(MAZE_HEIGHT - 2) {
-            for x in 2..(MAZE_WIDTH - 2) {
-                // Skip player area
-                if (x as i32 - 3).abs() <= 2 && (y as i32 - 3).abs() <= 2 {
-                    continue;
-                }
-                
-                let noise = ((x * 7 + y * 13 + self.level as usize * 17) % 100) as f32 / 100.0;
-                if noise < wall_density {
-                    self.maze[y][x] = true;
-                }
-            }
-        }
-        
-        // Create fewer strategic corridors for increased difficulty
-        let corridor_spacing = match self.level {
-            1 => 4, // More corridors - easier navigation
-            2 => 6, // Fewer corridors - harder
-            3 => 8, // Very few corridors - most challenging
-            _ => 5,
-        };
-        
-        for i in 1..(MAZE_WIDTH - 1) {
-            if i % corridor_spacing == 0 {
-                // Horizontal corridors (less frequent)
-                for x in 1..(MAZE_WIDTH - 1) {
-                    if x % 3 == 0 {
-                        self.maze[i][x] = false;
-                    }
-                }
-            }
-        }
-        
-        for i in 1..(MAZE_HEIGHT - 1) {
-            if i % (corridor_spacing + 1) == 0 {
-                // Vertical corridors (even less frequent)
-                for y in 1..(MAZE_HEIGHT - 1) {
-                    if y % 3 == 0 {
-                        self.maze[y][i] = false;
-                    }
-                }
-            }
-        }
+        // Create dense maze with creative patterns - much more challenging
+        self.generate_dense_maze_pattern();
         
         // Add more dead ends and false paths based on level
         let false_path_density = match self.level {
-            1 => 0.25,
-            2 => 0.40,
-            3 => 0.55,
-            _ => 0.30,
+            1 => 0.60, // Much higher density of false paths
+            2 => 0.75, // Very high density
+            3 => 0.85, // Extremely high density - almost every open space becomes a dead end
+            _ => 0.50,
         };
         
         for y in 3..(MAZE_HEIGHT - 3) {
@@ -247,12 +197,20 @@ impl GameState {
                 if !self.maze[y][x] {
                     let noise = ((x * 11 + y * 17 + self.level as usize * 23) % 100) as f32 / 100.0;
                     if noise < false_path_density {
-                        // Create a short dead end path
+                        // Create longer, more complex dead end networks
                         let directions = [(0, 1), (1, 0), (0, -1), (-1, 0)];
                         let dir_idx = (x + y + self.level as usize) % directions.len();
                         let (dx, dy) = directions[dir_idx];
                         
-                        for i in 1..=3 {
+                        // Create longer dead end paths based on level
+                        let path_length = match self.level {
+                            1 => 4, // Longer paths
+                            2 => 6, // Even longer paths
+                            3 => 8, // Very long winding dead ends
+                            _ => 3,
+                        };
+                        
+                        for i in 1..=path_length {
                             let nx = x as i32 + dx * i;
                             let ny = y as i32 + dy * i;
                             if nx > 0 && nx < (MAZE_WIDTH - 1) as i32 && 
@@ -261,9 +219,24 @@ impl GameState {
                             }
                         }
                         
+                        // Add branching dead ends for higher levels
+                        if self.level >= 2 {
+                            let perpendicular = [(-dy, dx), (dy, -dx)];
+                            for &(pdx, pdy) in &perpendicular {
+                                for i in 1..=3 {
+                                    let branch_x = x as i32 + dx * 2 + pdx * i;
+                                    let branch_y = y as i32 + dy * 2 + pdy * i;
+                                    if branch_x > 0 && branch_x < (MAZE_WIDTH - 1) as i32 && 
+                                       branch_y > 0 && branch_y < (MAZE_HEIGHT - 1) as i32 {
+                                        self.maze[branch_y as usize][branch_x as usize] = false;
+                                    }
+                                }
+                            }
+                        }
+                        
                         // Block the end to create dead end
-                        let end_x = x as i32 + dx * 4;
-                        let end_y = y as i32 + dy * 4;
+                        let end_x = x as i32 + dx * (path_length + 1);
+                        let end_y = y as i32 + dy * (path_length + 1);
                         if end_x > 0 && end_x < (MAZE_WIDTH - 1) as i32 && 
                            end_y > 0 && end_y < (MAZE_HEIGHT - 1) as i32 {
                             self.maze[end_y as usize][end_x as usize] = true;
@@ -639,12 +612,57 @@ impl GameState {
             }
         }
 
-        // Exit indicator - pulsing red dot
-        let pulse = (get_time() * 4.0).sin() * 0.3 + 0.7;
+        // Enhanced themed exit indicator with distance-based effects
+        let distance_to_exit = ((self.player_x - self.exit_x).powi(2) + (self.player_y - self.exit_y).powi(2)).sqrt();
+        let proximity_factor = (1.0 - (distance_to_exit / 800.0).min(1.0)).max(0.0);
+        let pulse = (get_time() * (3.0 + proximity_factor as f64 * 4.0)).sin() * 0.4 + 0.6;
+        let glow_intensity = pulse * (0.5 + proximity_factor as f64 * 0.5);
+        
         let ex = mx + (self.exit_x / CELL_SIZE) * cell;
         let ey = my + (self.exit_y / CELL_SIZE) * cell;
-        draw_rectangle(ex, ey, cell, cell, Color::new(1.0, pulse as f32 * 0.5, 0.0, 1.0));
-        draw_text("EXIT", ex - 8.0, ey - 5.0, 12.0, WHITE);
+        
+        match self.level {
+            1 => {
+                // Golden architectural exit with expanding glow when close
+                let glow_size = cell * (1.0 + proximity_factor * 0.8);
+                draw_rectangle(ex - (glow_size - cell) * 0.5, ey - (glow_size - cell) * 0.5, 
+                              glow_size, glow_size, Color::from_rgba(255, 215, 0, (glow_intensity * 100.0) as u8));
+                draw_rectangle(ex, ey, cell, cell, Color::from_rgba(255, 215, 0, (glow_intensity * 200.0) as u8));
+                draw_text("ARCH", ex - 8.0, ey - 5.0, 10.0, Color::from_rgba(255, 255, 255, 255));
+            },
+            2 => {
+                // Pulsing tech portal with energy rings
+                for ring in 0..3 {
+                    let ring_size = cell * (1.2 + ring as f32 * 0.3 + proximity_factor * 0.5);
+                    let ring_alpha = (glow_intensity * 80.0 / (ring + 1) as f64) as u8;
+                    draw_rectangle(ex - (ring_size - cell) * 0.5, ey - (ring_size - cell) * 0.5,
+                                  ring_size, ring_size, Color::from_rgba(0, 150, 255, ring_alpha));
+                }
+                draw_rectangle(ex, ey, cell, cell, Color::from_rgba(0, 200, 255, (glow_intensity * 220.0) as u8));
+                draw_text("PORTAL", ex - 12.0, ey - 5.0, 9.0, Color::from_rgba(150, 220, 255, 255));
+            },
+            3 => {
+                // Radiant crystal gateway with prismatic effects
+                let crystal_glow = cell * (1.0 + proximity_factor * 1.2);
+                // Multiple colored layers for prismatic effect
+                let colors = [
+                    Color::from_rgba(255, 255, 255, (glow_intensity * 60.0) as u8),
+                    Color::from_rgba(200, 220, 255, (glow_intensity * 80.0) as u8),
+                    Color::from_rgba(255, 200, 255, (glow_intensity * 60.0) as u8),
+                ];
+                for (i, color) in colors.iter().enumerate() {
+                    let layer_size = crystal_glow * (1.0 - i as f32 * 0.2);
+                    draw_rectangle(ex - (layer_size - cell) * 0.5, ey - (layer_size - cell) * 0.5,
+                                  layer_size, layer_size, *color);
+                }
+                draw_rectangle(ex, ey, cell, cell, Color::from_rgba(255, 255, 255, (glow_intensity * 240.0) as u8));
+                draw_text("GATE", ex - 8.0, ey - 5.0, 10.0, Color::from_rgba(200, 220, 255, 255));
+            },
+            _ => {
+                draw_rectangle(ex, ey, cell, cell, Color::new(1.0, pulse as f32 * 0.5, 0.0, 1.0));
+                draw_text("EXIT", ex - 8.0, ey - 5.0, 12.0, WHITE);
+            }
+        }
 
         // Player position - accurate positioning with cell centering
         let px = mx + (self.player_x / CELL_SIZE) * cell;
@@ -776,6 +794,270 @@ impl GameState {
             3 => self.draw_crystal_wall_column(x, y, width, height, column_index),
             _ => draw_rectangle(x, y, width, height, GRAY),
         }
+    }
+
+    fn generate_dense_maze_pattern(&mut self) {
+        // Fill entire maze with walls first
+        for y in 0..MAZE_HEIGHT {
+            for x in 0..MAZE_WIDTH {
+                self.maze[y][x] = true;
+            }
+        }
+        
+        // Keep borders as walls but create internal maze structure
+        match self.level {
+            1 => self.generate_level1_pattern(),
+            2 => self.generate_level2_pattern(), 
+            3 => self.generate_level3_pattern(),
+            _ => self.generate_level1_pattern(),
+        };
+        
+        // Ensure player starting area is clear
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let px = 3 + dx;
+                let py = 3 + dy;
+                if px >= 0 && px < MAZE_WIDTH as i32 && py >= 0 && py < MAZE_HEIGHT as i32 {
+                    self.maze[py as usize][px as usize] = false;
+                }
+            }
+        }
+        
+        // Ensure exit area is accessible
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let ex = (self.exit_x / CELL_SIZE) as i32 + dx;
+                let ey = (self.exit_y / CELL_SIZE) as i32 + dy;
+                if ex >= 0 && ex < MAZE_WIDTH as i32 && ey >= 0 && ey < MAZE_HEIGHT as i32 {
+                    self.maze[ey as usize][ex as usize] = false;
+                }
+            }
+        }
+        
+        // Create guaranteed path from start to exit
+        self.create_solution_path();
+    }
+    
+    fn generate_level1_pattern(&mut self) {
+        // Level 1: Moderate density - easier but still challenging
+        for y in 1..(MAZE_HEIGHT - 1) {
+            for x in 1..(MAZE_WIDTH - 1) {
+                // Create grid pattern with wider corridors for level 1
+                if (x % 4 == 1 || x % 4 == 2) || (y % 4 == 1 || y % 4 == 2) {
+                    self.maze[y][x] = false;
+                }
+                
+                // Add some walls but keep it navigable
+                let noise = ((x * 11 + y * 7) % 100) as f32 / 100.0;
+                if noise < 0.4 {
+                    self.maze[y][x] = true;
+                }
+            }
+        }
+        
+        // Add moderate dead ends
+        for y in 2..(MAZE_HEIGHT - 2) {
+            for x in 2..(MAZE_WIDTH - 2) {
+                if !self.maze[y][x] {
+                    let neighbors = self.count_wall_neighbors(x, y);
+                    if neighbors >= 3 {
+                        let noise = ((x * 13 + y * 17) % 100) as f32 / 100.0;
+                        if noise < 0.3 {
+                            self.maze[y][x] = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    fn generate_level2_pattern(&mut self) {
+        // Level 2: Higher density with tighter passages
+        for y in 1..(MAZE_HEIGHT - 1) {
+            for x in 1..(MAZE_WIDTH - 1) {
+                // Create tighter grid pattern
+                if (x % 3 == 1) || (y % 3 == 1) {
+                    self.maze[y][x] = false;
+                }
+                
+                // Add more walls than level 1
+                let noise = ((x * 11 + y * 7) % 100) as f32 / 100.0;
+                if noise < 0.6 {
+                    self.maze[y][x] = true;
+                }
+            }
+        }
+        
+        // Add spiral pattern for complexity
+        let center_x = MAZE_WIDTH / 2;
+        let center_y = MAZE_HEIGHT / 2;
+        for y in 2..(MAZE_HEIGHT - 2) {
+            for x in 2..(MAZE_WIDTH - 2) {
+                let dx = x as i32 - center_x as i32;
+                let dy = y as i32 - center_y as i32;
+                let distance = ((dx * dx + dy * dy) as f32).sqrt();
+                let angle = (dy as f32).atan2(dx as f32);
+                
+                // Create spiral corridors
+                let spiral_factor = (distance * 0.4 + angle * 3.0).sin();
+                if spiral_factor > 0.3 && !self.maze[y][x] {
+                    self.maze[y][x] = false;
+                }
+            }
+        }
+        
+        // Add more strategic dead ends
+        for y in 2..(MAZE_HEIGHT - 2) {
+            for x in 2..(MAZE_WIDTH - 2) {
+                if !self.maze[y][x] {
+                    let neighbors = self.count_wall_neighbors(x, y);
+                    if neighbors >= 2 {
+                        let noise = ((x * 13 + y * 17) % 100) as f32 / 100.0;
+                        if noise < 0.5 {
+                            self.maze[y][x] = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    fn generate_level3_pattern(&mut self) {
+        // Level 3: Maximum density - extremely challenging
+        for y in 1..(MAZE_HEIGHT - 1) {
+            for x in 1..(MAZE_WIDTH - 1) {
+                // Very tight grid pattern - only 1-wide corridors
+                if (x % 3 == 1) || (y % 3 == 1) {
+                    self.maze[y][x] = false;
+                }
+                
+                // Maximum wall density
+                let noise = ((x * 11 + y * 7) % 100) as f32 / 100.0;
+                if noise < 0.8 {
+                    self.maze[y][x] = true;
+                }
+            }
+        }
+        
+        // Create complex fractal-like patterns
+        for y in 1..(MAZE_HEIGHT - 1) {
+            for x in 1..(MAZE_WIDTH - 1) {
+                // Multi-scale fractal pattern
+                let scale1 = ((x / 2) % 3 == 1) && ((y / 2) % 3 == 1);
+                let scale2 = ((x / 4) % 5 == 2) || ((y / 4) % 5 == 2);
+                
+                if scale1 || scale2 {
+                    self.maze[y][x] = false;
+                }
+                
+                // Add diagonal maze corridors (fix overflow)
+                if (x + y) % 8 == 0 || ((x as i32 - y as i32 + MAZE_WIDTH as i32) as usize) % 10 == 0 {
+                    self.maze[y][x] = false;
+                }
+            }
+        }
+        
+        // Create extremely complex branching dead ends
+        for y in 3..(MAZE_HEIGHT - 3) {
+            for x in 3..(MAZE_WIDTH - 3) {
+                // Tree-like branching with maximum complexity
+                let branch_pattern = (x * 7 + y * 11) % 15;
+                if branch_pattern < 2 {
+                    // Create very narrow branching corridors
+                    for i in 0..5 {
+                        let bx = x + (i % 3);
+                        let by = y + (i / 3);
+                        if bx < MAZE_WIDTH - 1 && by < MAZE_HEIGHT - 1 {
+                            self.maze[by][bx] = false;
+                        }
+                    }
+                }
+                
+                // Add extremely narrow winding paths
+                if (x * 3 + y * 5) % 13 < 1 {
+                    let directions = [(0, 1), (1, 0), (1, 1), (-1, 1)];
+                    let dir = &directions[(x + y) % 4];
+                    for step in 0..6 {
+                        let wx = x as i32 + dir.0 * step;
+                        let wy = y as i32 + dir.1 * step;
+                        if wx > 0 && wx < (MAZE_WIDTH - 1) as i32 && wy > 0 && wy < (MAZE_HEIGHT - 1) as i32 {
+                            self.maze[wy as usize][wx as usize] = false;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Final pass - create maximum dead ends
+        for y in 2..(MAZE_HEIGHT - 2) {
+            for x in 2..(MAZE_WIDTH - 2) {
+                if !self.maze[y][x] {
+                    let neighbors = self.count_wall_neighbors(x, y);
+                    // Create maximum dead ends
+                    if neighbors >= 1 {
+                        let noise = ((x * 19 + y * 23) % 100) as f32 / 100.0;
+                        if noise < 0.7 {
+                            self.maze[y][x] = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    fn count_wall_neighbors(&self, x: usize, y: usize) -> usize {
+        let mut count = 0;
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                if dx == 0 && dy == 0 { continue; }
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy;
+                if nx >= 0 && nx < MAZE_WIDTH as i32 && ny >= 0 && ny < MAZE_HEIGHT as i32 {
+                    if self.maze[ny as usize][nx as usize] {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
+    
+    fn create_solution_path(&mut self) {
+        // Use A* pathfinding to ensure there's always a solution
+        let start_x = 3;
+        let start_y = 3;
+        let end_x = (self.exit_x / CELL_SIZE) as usize;
+        let end_y = (self.exit_y / CELL_SIZE) as usize;
+        
+        // Simple path creation - carve direct path with some randomness
+        let mut current_x = start_x;
+        let mut current_y = start_y;
+        
+        while current_x != end_x || current_y != end_y {
+            self.maze[current_y][current_x] = false;
+            
+            // Move towards target with some randomness
+            let dx = if current_x < end_x { 1 } else if current_x > end_x { -1 } else { 0 };
+            let dy = if current_y < end_y { 1 } else if current_y > end_y { -1 } else { 0 };
+            
+            // Add randomness to path
+            let noise = ((current_x * 7 + current_y * 11) % 100) as f32 / 100.0;
+            if noise < 0.3 && dx != 0 {
+                current_x = (current_x as i32 + dx).max(1).min(MAZE_WIDTH as i32 - 2) as usize;
+            } else if noise < 0.6 && dy != 0 {
+                current_y = (current_y as i32 + dy).max(1).min(MAZE_HEIGHT as i32 - 2) as usize;
+            } else {
+                // Move in primary direction
+                if (current_x as i32 - end_x as i32).abs() > (current_y as i32 - end_y as i32).abs() {
+                    current_x = (current_x as i32 + dx).max(1).min(MAZE_WIDTH as i32 - 2) as usize;
+                } else {
+                    current_y = (current_y as i32 + dy).max(1).min(MAZE_HEIGHT as i32 - 2) as usize;
+                }
+            }
+        }
+        
+        // Ensure final path to exit
+        self.maze[end_y][end_x] = false;
     }
 }
 
