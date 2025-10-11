@@ -122,7 +122,7 @@ impl MultiplayerManager {
                 let player_name = parts[1].to_string();
                 let state_parts: Vec<&str> = parts[2].split(',').collect();
                 if state_parts.len() >= 7 {
-                    if let (Ok(x), Ok(y), Ok(angle), Ok(_level), Ok(health), Ok(_ammo), Ok(_score)) = (
+                    if let (Ok(x), Ok(y), Ok(angle), Ok(level), Ok(health), Ok(_ammo), Ok(_score)) = (
                         state_parts[0].parse::<f32>(),
                         state_parts[1].parse::<f32>(),
                         state_parts[2].parse::<f32>(),
@@ -137,11 +137,12 @@ impl MultiplayerManager {
                             y,
                             angle,
                             health,
+                            level,
                             last_seen: Instant::now(),
                         };
                         self.other_players.insert(player_name.clone(), other_player);
-                        println!("📍 Updated player {}: ({:.1}, {:.1}) angle={:.2} health={}", 
-                                player_name, x, y, angle, health);
+                        println!("📍 Updated player {}: ({:.1}, {:.1}) level={} angle={:.2} health={}", 
+                                player_name, x, y, level, angle, health);
                     }
                 }
             }
@@ -205,12 +206,12 @@ impl MultiplayerManager {
         None
     }
 
-    pub fn send_player_state(&mut self, x: f32, y: f32, angle: f32, health: i32) {
+    pub fn send_player_state(&mut self, x: f32, y: f32, angle: f32, level: i32, health: i32) {
         if let Some(ref socket) = self.socket {
             let now = Instant::now();
             if now.duration_since(self.last_state_send) > std::time::Duration::from_millis(50) {
                 // Send state in format expected by server: STATE:x,y,angle,level,health,ammo,score
-                let state_msg = format!("STATE:{:.1},{:.1},{:.2},{},{},{},{}", x, y, angle, 1, health, 30, 0);
+                let state_msg = format!("STATE:{:.1},{:.1},{:.2},{},{},{},{}", x, y, angle, level, health, 30, 0);
                 let _ = socket.send(state_msg.as_bytes());
                 self.last_state_send = now;
             }
@@ -274,7 +275,7 @@ impl MultiplayerManager {
                 }
             }
             
-            // Check other player collisions
+            // Check other player collisions (only same level)
             for (other_name, other_player) in &self.other_players {
                 if bullet.owner != *other_name {
                     let dist = ((bullet.x - other_player.x).powi(2) + (bullet.y - other_player.y).powi(2)).sqrt();
@@ -310,8 +311,12 @@ impl MultiplayerManager {
         (hit_player, hit_by_player)
     }
 
-    pub fn draw_other_players_on_minimap(&self, mx: f32, my: f32, cell: f32) {
+    pub fn draw_other_players_on_minimap(&self, mx: f32, my: f32, cell: f32, current_level: i32) {
         for player in self.other_players.values() {
+            // Only show players in the same level on minimap
+            if player.level != current_level {
+                continue;
+            }
             let player_color = if player.health > 75 {
                 LIME
             } else if player.health > 50 {

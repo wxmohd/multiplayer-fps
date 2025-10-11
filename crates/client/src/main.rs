@@ -29,6 +29,7 @@ struct OtherPlayer {
     y: f32,
     angle: f32,
     health: i32,
+    level: i32,
     last_seen: Instant,
 }
 
@@ -358,7 +359,7 @@ impl GameState {
             self.player_x = spawn_x;
             self.player_y = spawn_y;
         }
-        self.multiplayer.send_player_state(self.player_x, self.player_y, self.player_angle, self.health);
+        self.multiplayer.send_player_state(self.player_x, self.player_y, self.player_angle, self.level as i32, self.health);
         
         // Debug: Print local player position and other players
         if self.multiplayer.other_players.len() > 0 {
@@ -534,6 +535,10 @@ impl GameState {
     
     fn draw_other_players(&self) {
         for player in self.multiplayer.other_players.values() {
+            // Only render players in the same level
+            if player.level != self.level as i32 {
+                continue;
+            }
             // Calculate relative position in world space
             let world_dx = player.x - self.player_x;
             let world_dy = player.y - self.player_y;
@@ -886,7 +891,7 @@ impl GameState {
         draw_circle_lines(mx + (self.player_x / CELL_SIZE) * cell, my + (self.player_y / CELL_SIZE) * cell, 4.0, 1.0, BLACK);
         
         // Other players on minimap (visible and distinctive)
-        self.multiplayer.draw_other_players_on_minimap(mx, my, cell);
+        self.multiplayer.draw_other_players_on_minimap(mx, my, cell, self.level as i32);
         
         // Player direction indicator - accurate angle representation
         let px = mx + (self.player_x / CELL_SIZE) * cell;
