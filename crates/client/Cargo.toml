@@ -7,3 +7,4 @@ edition = "2021"
 shared = { path = "../shared" }
 macroquad = "0.4"
 tokio = { version = "1.0", features = ["full"] }
+rand = "0.8"

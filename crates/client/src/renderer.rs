@@ -70,7 +70,7 @@ impl Renderer {
         fire_t: f32,
         recoil: f32,
         bob_phase: f32,
-        ammo: i32,
+        _ammo: i32,
         assets: &AssetManager,
     ) {
         let sw = screen_width();
@@ -130,14 +130,10 @@ impl Renderer {
                 );
             }
         }
-
-        // Ammo counter
-        let ammo_text = format!("AMMO: {}", ammo);
-        draw_text(&ammo_text, sw - 150.0, sh - 30.0, 24.0, WHITE);
     }
 
     // Draw HUD elements
-    pub fn draw_hud(&self, level: u32, health: i32, score: i32) {
+    pub fn draw_hud(&self, level: u32, health: i32, score: i32, ammo: i32) {
         let sw = screen_width();
         
         // Level indicator
@@ -146,8 +142,15 @@ impl Renderer {
         // Health
         draw_text(&format!("HEALTH: {}", health), 20.0, 60.0, 24.0, WHITE);
         
+        // Ammo
+        let ammo_color = if ammo <= 5 { RED } else if ammo <= 10 { YELLOW } else { WHITE };
+        draw_text(&format!("AMMO: {}/30", ammo), 20.0, 90.0, 24.0, ammo_color);
+        
         // Score
-        draw_text(&format!("SCORE: {}", score), 20.0, 90.0, 24.0, WHITE);
+        draw_text(&format!("SCORE: {}", score), 20.0, 120.0, 24.0, WHITE);
+        
+        // Controls hint
+        draw_text("Press R to recharge ammo", 20.0, 150.0, 16.0, GRAY);
         
         // FPS counter
         draw_text(&format!("FPS: {:.1}", self.fps), sw - 100.0, 30.0, 20.0, WHITE);
