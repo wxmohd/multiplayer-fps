@@ -533,6 +533,37 @@ impl GameState {
         draw_rectangle_lines(50.0, sh / 2.0 - 150.0, sw - 100.0, 280.0, 4.0, border_color);
     }
     
+    fn is_player_visible(&self, from_x: f32, from_y: f32, to_x: f32, to_y: f32) -> bool {
+        // Simple raycasting to check if there's a wall between two points
+        let dx = to_x - from_x;
+        let dy = to_y - from_y;
+        let distance = (dx * dx + dy * dy).sqrt();
+        
+        // Number of steps for raycasting (more steps = more accurate)
+        let steps = (distance / (CELL_SIZE * 0.5)) as i32;
+        if steps == 0 { return true; }
+        
+        let step_x = dx / steps as f32;
+        let step_y = dy / steps as f32;
+        
+        // Cast ray from player to target
+        for i in 1..steps {
+            let check_x = from_x + step_x * i as f32;
+            let check_y = from_y + step_y * i as f32;
+            
+            // Convert to grid coordinates
+            let grid_x = (check_x / CELL_SIZE) as usize;
+            let grid_y = (check_y / CELL_SIZE) as usize;
+            
+            // Check if we hit a wall
+            if grid_x >= self.maze_width || grid_y >= self.maze_height || self.maze[grid_y][grid_x] {
+                return false; // Wall blocks the view
+            }
+        }
+        
+        true // No walls in the way
+    }
+    
     fn draw_other_players(&self) {
         for player in self.multiplayer.other_players.values() {
             // Only render players in the same level
@@ -558,8 +589,11 @@ impl GameState {
             println!("🔍 Player {}: world_offset=({:.1}, {:.1}), view_space=({:.1}, {:.1})", 
                     player.name, world_dx, world_dy, view_x, view_z);
             
-            // Only draw if in front and within range
-            if distance < 1200.0 && view_z > 20.0 {
+            // Check if player is occluded by walls using raycasting
+            let is_visible = self.is_player_visible(self.player_x, self.player_y, player.x, player.y);
+            
+            // Only draw if in front, within range, and not occluded by walls
+            if distance < 1200.0 && view_z > 20.0 && is_visible {
                 // Perspective projection
                 let screen_scale = 500.0 / view_z;
                 let screen_x = screen_width() / 2.0 + view_x * screen_scale;

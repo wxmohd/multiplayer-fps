@@ -356,7 +356,8 @@ impl MultiplayerManager {
             let age = now.duration_since(notif.created).as_secs_f32();
             let alpha = (1.0 - age / 5.0).max(0.0);
             
-            let y_pos = 100.0 + i as f32 * 25.0;
+            // Position notifications below the "Press R to recharge ammo" text (which is at y=150)
+            let y_pos = 180.0 + i as f32 * 25.0;
             let bg_color = Color::new(0.0, 0.0, 0.0, alpha * 0.8);
             let text_color = Color::new(notif.color.r, notif.color.g, notif.color.b, alpha);
             
